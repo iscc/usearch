@@ -1,0 +1,256 @@
+name: Build and Publish Wheels to GitHub Pages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  PYTHONUTF8: 1
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build_wheels:
+    name: Build Wheels (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+        python-version: ['310', '311', '312', '313']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Docker (Linux only)
+        if: matrix.os == 'ubuntu-24.04'
+        uses: crazy-max/ghaction-setup-docker@v1.0.0
+
+      - name: Setup QEMU (Linux only)
+        if: matrix.os == 'ubuntu-24.04'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install cibuildwheel
+        run: python -m pip install cibuildwheel
+
+      - name: Build wheels
+        run: cibuildwheel --output-dir wheelhouse
+        env:
+          # Build only for x86_64/AMD64
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_SKIP: '*-win32 *-manylinux_i686 *-musllinux_i686 pp*'
+          CIBW_ARCHS_LINUX: x86_64
+          CIBW_ARCHS_MACOS: x86_64
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_TEST_SKIP: '*'
+          # Use manylinux2014 for better compatibility
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
+          CIBW_BUILD_VERBOSITY: 1
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  generate_index:
+    name: Generate PEP 503 Index
+    needs: build_wheels
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Display downloaded wheels
+        run: |
+          echo "Downloaded wheels:"
+          ls -lh dist/
+          echo ""
+          echo "Total wheels: $(ls -1 dist/*.whl | wc -l)"
+
+      - name: Generate PEP 503 index
+        run: |
+          python3 << 'EOF'
+          import os
+          from pathlib import Path
+          from html import escape
+
+          # Create directory structure
+          index_dir = Path("pypi-index")
+          index_dir.mkdir(exist_ok=True)
+          usearch_dir = index_dir / "usearch"
+          usearch_dir.mkdir(exist_ok=True)
+
+          # Get all wheel files
+          wheels = sorted(Path("dist").glob("*.whl"))
+          print(f"Found {len(wheels)} wheel files")
+
+          # Copy wheels to index directory
+          import shutil
+          for wheel in wheels:
+              shutil.copy(wheel, usearch_dir / wheel.name)
+              print(f"Copied: {wheel.name}")
+
+          # Generate root index.html
+          root_html = """<!DOCTYPE html>
+          <html>
+          <head>
+              <meta name="pypi:repository-version" content="1.0">
+              <title>Simple index</title>
+          </head>
+          <body>
+              <h1>Simple index</h1>
+              <a href="usearch/">usearch</a><br/>
+          </body>
+          </html>
+          """
+
+          (index_dir / "index.html").write_text(root_html)
+          print("Generated root index.html")
+
+          # Generate usearch/index.html
+          package_html = """<!DOCTYPE html>
+          <html>
+          <head>
+              <meta name="pypi:repository-version" content="1.0">
+              <title>Links for usearch</title>
+          </head>
+          <body>
+              <h1>Links for usearch</h1>
+          """
+
+          for wheel in sorted(usearch_dir.glob("*.whl")):
+              wheel_name = escape(wheel.name)
+              package_html += f'    <a href="{wheel_name}">{wheel_name}</a><br/>\n'
+
+          package_html += """  </body>
+          </html>
+          """
+
+          (usearch_dir / "index.html").write_text(package_html)
+          print(f"Generated usearch/index.html with {len(wheels)} wheels")
+
+          # Create a README
+          readme = f"""# USearch Python Package Index
+
+          This is a PEP 503 compliant Python package index for the patched USearch fork.
+
+          ## Installation
+
+          Add this index to your project:
+
+          ```toml
+          [[tool.uv.index]]
+          url = "https://iscc.github.io/usearch/"
+          ```
+
+          Then install:
+
+          ```bash
+          uv pip install usearch
+          ```
+
+          ## Available Wheels
+
+          This index contains {len(wheels)} wheels for:
+          - Python versions: 3.10, 3.11, 3.12, 3.13
+          - Platforms: Linux (x86_64), macOS (x86_64), Windows (x86_64)
+
+          ## Tag: {os.environ.get('GITHUB_REF_NAME', 'unknown')}
+
+          Built from: https://github.com/iscc/usearch
+          """
+
+          (index_dir / "README.md").write_text(readme)
+          print("Generated README.md")
+
+          print("\nIndex structure:")
+          for item in sorted(index_dir.rglob("*")):
+              if item.is_file():
+                  print(f"  {item.relative_to(index_dir)}")
+          EOF
+
+      - name: Upload index artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-index
+          path: pypi-index/
+
+  deploy_pages:
+    name: Deploy to GitHub Pages
+    needs: generate_index
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download index artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pypi-index
+          path: pypi-index
+
+      - name: Display index structure
+        run: |
+          echo "Index structure:"
+          find pypi-index -type f
+          echo ""
+          echo "Index root:"
+          ls -la pypi-index/
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pypi-index
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Display deployment URL
+        run: |
+          echo "✅ Deployment successful!"
+          echo "📦 Package index available at: ${{ steps.deployment.outputs.page_url }}"
+          echo ""
+          echo "To use in your project:"
+          echo ""
+          echo "[[tool.uv.index]]"
+          echo "url = \"${{ steps.deployment.outputs.page_url }}\""
