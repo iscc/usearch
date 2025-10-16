@@ -102,3 +102,9 @@ csharp/packages
 *.out
 *.app
 
+# Jetbrains
+.idea/
+
+# AI
+CLAUDE.md
+
