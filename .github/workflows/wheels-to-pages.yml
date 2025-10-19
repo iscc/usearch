@@ -56,16 +56,8 @@ jobs:
       - name: Build wheels
         run: cibuildwheel --output-dir wheelhouse
         env:
-          # Build only for x86_64/AMD64
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_SKIP: '*-win32 *-manylinux_i686 *-musllinux_i686 pp*'
-          CIBW_ARCHS_LINUX: x86_64
-          CIBW_ARCHS_MACOS: x86_64
-          CIBW_ARCHS_WINDOWS: AMD64
-          CIBW_TEST_SKIP: '*'
-          # Use manylinux2014 for better compatibility
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
-          CIBW_BUILD_VERBOSITY: 1
+          CIBW_TEST_SKIP: "*-win_arm64"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -188,7 +180,10 @@ jobs:
 
           This index contains {len(wheels)} wheels for:
           - Python versions: 3.10, 3.11, 3.12, 3.13
-          - Platforms: Linux (x86_64), macOS (x86_64), Windows (x86_64)
+          - Platforms:
+            - Linux: manylinux (x86_64, aarch64), musllinux (x86_64, aarch64)
+            - macOS: universal2 (x86_64 + arm64), x86_64, arm64
+            - Windows: AMD64, ARM64
 
           ## Tag: {os.environ.get('GITHUB_REF_NAME', 'unknown')}
 
