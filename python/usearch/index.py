@@ -492,10 +492,13 @@ class IndexedKeys(Sequence):
                 raise IndexError("Index out of range")
             return self.index._compiled.get_key_at_offset(offset)
 
-    def __array__(self, dtype=None) -> np.ndarray:
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
         if dtype is None:
             dtype = Key
-        return self.index._compiled.get_keys_in_slice().astype(dtype)
+        result = self.index._compiled.get_keys_in_slice().astype(dtype)
+        if copy:
+            result = result.copy()
+        return result
 
 
 class Index:
