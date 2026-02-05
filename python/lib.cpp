@@ -850,24 +850,36 @@ template <typename index_at> typename index_at::stats_t compute_stats(index_at c
 template <typename index_at> typename index_at::stats_t compute_level_stats(index_at const &index, std::size_t level) { return index.stats(level); }
 // clang-format on
 
+template <typename function_at>
+void with_optional_gil_release(bool release_gil, function_at&& function) {
+    if (release_gil) {
+        py::gil_scoped_release release;
+        function();
+    } else {
+        function();
+    }
+}
+
 template <typename index_at>
 void load_index_from_path(index_at& index, std::string const& path, progress_func_t const& progress) {
-    index.load(path.c_str(), {}, progress_t{progress}).error.raise();
-
-    // Reserve memory and threads for restored index.
-    std::size_t threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(index.size(), threads)))
-        throw std::invalid_argument("Out of memory!");
+    with_optional_gil_release(!progress, [&] {
+        index.load(path.c_str(), {}, progress_t{progress}).error.raise();
+        // Reserve memory and threads for restored index.
+        std::size_t threads = std::thread::hardware_concurrency();
+        if (!index.try_reserve(index_limits_t(index.size(), threads)))
+            throw std::invalid_argument("Out of memory!");
+    });
 }
 
 template <typename index_at>
 void view_index_from_path(index_at& index, std::string const& path, progress_func_t const& progress) {
-    index.view(path.c_str(), 0, {}, progress_t{progress}).error.raise();
-
-    // Reserve memory and threads for restored index.
-    std::size_t threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(index.size(), threads)))
-        throw std::invalid_argument("Out of memory!");
+    with_optional_gil_release(!progress, [&] {
+        index.view(path.c_str(), 0, {}, progress_t{progress}).error.raise();
+        // Reserve memory and threads for restored index.
+        std::size_t threads = std::thread::hardware_concurrency();
+        if (!index.try_reserve(index_limits_t(index.size(), threads)))
+            throw std::invalid_argument("Out of memory!");
+    });
 }
 
 template <typename py_bytes_at> memory_mapped_file_t memory_map_from_bytes(py_bytes_at&& bytes) {
@@ -903,22 +915,26 @@ template <typename index_at> py::object save_index_to_buffer(index_at const& ind
 
 template <typename index_at>
 void load_index_from_buffer(index_at& index, py::object const& buffer_obj, progress_func_t const& progress) {
-    index.load(memory_map_from_bytes(buffer_obj), {}, {}, progress_t{progress}).error.raise();
-
-    // Reserve memory and threads for restored index.
-    std::size_t threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(index.size(), threads)))
-        throw std::invalid_argument("Out of memory!");
+    auto mmap = memory_map_from_bytes(buffer_obj);
+    with_optional_gil_release(!progress, [&] {
+        index.load(std::move(mmap), {}, {}, progress_t{progress}).error.raise();
+        // Reserve memory and threads for restored index.
+        std::size_t threads = std::thread::hardware_concurrency();
+        if (!index.try_reserve(index_limits_t(index.size(), threads)))
+            throw std::invalid_argument("Out of memory!");
+    });
 }
 
 template <typename index_at>
 void view_index_from_buffer(index_at& index, py::object const& buffer_obj, progress_func_t const& progress) {
-    index.view(memory_map_from_bytes(buffer_obj), {}, {}, progress_t{progress}).error.raise();
-
-    // Reserve memory and threads for restored index.
-    std::size_t threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(index.size(), threads)))
-        throw std::invalid_argument("Out of memory!");
+    auto mmap = memory_map_from_bytes(buffer_obj);
+    with_optional_gil_release(!progress, [&] {
+        index.view(std::move(mmap), {}, {}, progress_t{progress}).error.raise();
+        // Reserve memory and threads for restored index.
+        std::size_t threads = std::thread::hardware_concurrency();
+        if (!index.try_reserve(index_limits_t(index.size(), threads)))
+            throw std::invalid_argument("Out of memory!");
+    });
 }
 
 template <typename index_at> std::vector<typename index_at::stats_t> compute_levels_stats(index_at const& index) {
