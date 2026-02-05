@@ -107,4 +107,5 @@ csharp/packages
 
 # AI
 CLAUDE.md
+.claude/
 
