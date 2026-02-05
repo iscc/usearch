@@ -1954,7 +1954,7 @@ class index_dense_gt {
 
             // Export in case we need to refine afterwards
             clusters[query_idx].centroid = result.cluster.member.key;
-            clusters[query_idx].vector = vector_data_at_slot_(static_cast<compressed_slot_t>(result.cluster.member.slot));
+            clusters[query_idx].vector = const_cast<byte_t*>(vector_data_at_slot_(static_cast<compressed_slot_t>(result.cluster.member.slot)));
             clusters[query_idx].merged_into = free_key();
             clusters[query_idx].popularity = 1;
 
