@@ -415,6 +415,14 @@ class index_dense_gt {
     using member_iterator_t = typename index_t::member_iterator_t;
     using member_citerator_t = typename index_t::member_citerator_t;
 
+    inline byte_t const* vector_data_at_slot_(compressed_slot_t slot) const noexcept {
+        if (vectors_view_base_) {
+            usearch_assert_m(static_cast<std::size_t>(slot) < vectors_view_count_, "Slot out of range");
+            return vectors_view_base_ + vectors_view_stride_ * static_cast<std::size_t>(slot);
+        }
+        return vectors_lookup_[slot];
+    }
+
     /// @brief Punned metric object.
     class metric_proxy_t {
         index_dense_gt const* index_ = nullptr;
@@ -432,8 +440,8 @@ class index_dense_gt {
 
         inline distance_t operator()(byte_t const* a, byte_t const* b) const noexcept { return f(a, b); }
 
-        inline byte_t const* v(member_cref_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
-        inline byte_t const* v(member_citerator_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
+        inline byte_t const* v(member_cref_t m) const noexcept { return index_->vector_data_at_slot_(get_slot(m)); }
+        inline byte_t const* v(member_citerator_t m) const noexcept { return index_->vector_data_at_slot_(get_slot(m)); }
         inline distance_t f(byte_t const* a, byte_t const* b) const noexcept { return index_->metric_(a, b); }
     };
 
@@ -458,6 +466,11 @@ class index_dense_gt {
 
     /// @brief For every managed `compressed_slot_t` stores a pointer to the allocated vector copy.
     mutable vectors_lookup_t vectors_lookup_;
+
+    /// @brief For memory-mapped views with contiguous vectors, avoid building `vectors_lookup_` table.
+    byte_t const* vectors_view_base_ = nullptr;
+    std::size_t vectors_view_stride_ = 0;
+    std::size_t vectors_view_count_ = 0;
 
     using available_threads_allocator_t = aligned_allocator_gt<std::size_t, 64>;
     using available_threads_t = ring_gt<std::size_t, available_threads_allocator_t>;
@@ -498,19 +511,25 @@ class index_dense_gt {
     };
 
     /// @brief Multi-Map from keys to IDs, and allocated vectors.
-    flat_hash_multi_set_gt<key_and_slot_t, lookup_key_hash_t, lookup_key_same_t> slot_lookup_;
+    /// Mutable to allow lazy initialization from const methods (e.g., after view/load).
+    mutable flat_hash_multi_set_gt<key_and_slot_t, lookup_key_hash_t, lookup_key_same_t> slot_lookup_;
 
     /// @brief Mutex, controlling concurrent access to `slot_lookup_`.
     mutable shared_mutex_t slot_lookup_mutex_;
 
     /// @brief Ring-shaped queue of deleted entries, to be reused on future insertions.
-    ring_gt<compressed_slot_t> free_keys_;
+    /// Mutable to allow lazy initialization from const methods (e.g., after view/load).
+    mutable ring_gt<compressed_slot_t> free_keys_;
 
     /// @brief Mutex, controlling concurrent access to `free_keys_`.
     mutable std::mutex free_keys_mutex_;
 
     /// @brief A constant for the reserved key value, used to mark deleted entries.
     vector_key_t free_key_ = default_free_value<vector_key_t>();
+
+    /// @brief Flag indicating whether key lookups have been indexed.
+    /// Used for lazy initialization of slot_lookup_ in view mode.
+    mutable std::atomic<bool> keys_indexed_{true};
 
     /// @brief Locks the thread for the duration of the operation.
     struct thread_lock_t {
@@ -574,11 +593,15 @@ class index_dense_gt {
 
           vectors_tape_allocator_(std::move(other.vectors_tape_allocator_)), //
           vectors_lookup_(std::move(other.vectors_lookup_)),                 //
+          vectors_view_base_(exchange(other.vectors_view_base_, nullptr)),   //
+          vectors_view_stride_(exchange(other.vectors_view_stride_, 0)),     //
+          vectors_view_count_(exchange(other.vectors_view_count_, 0)),       //
 
-          available_threads_(std::move(other.available_threads_)), //
-          slot_lookup_(std::move(other.slot_lookup_)),             //
-          free_keys_(std::move(other.free_keys_)),                 //
-          free_key_(std::move(other.free_key_)) {}                 //
+          available_threads_(std::move(other.available_threads_)),                      //
+          slot_lookup_(std::move(other.slot_lookup_)),                                  //
+          free_keys_(std::move(other.free_keys_)),                                      //
+          free_key_(std::move(other.free_key_)),                                        //
+          keys_indexed_(other.keys_indexed_.load(std::memory_order_relaxed)) {}         //
 
     index_dense_gt& operator=(index_dense_gt&& other) {
         swap(other);
@@ -599,11 +622,20 @@ class index_dense_gt {
 
         std::swap(vectors_tape_allocator_, other.vectors_tape_allocator_);
         std::swap(vectors_lookup_, other.vectors_lookup_);
+        std::swap(vectors_view_base_, other.vectors_view_base_);
+        std::swap(vectors_view_stride_, other.vectors_view_stride_);
+        std::swap(vectors_view_count_, other.vectors_view_count_);
 
         std::swap(available_threads_, other.available_threads_);
         std::swap(slot_lookup_, other.slot_lookup_);
         std::swap(free_keys_, other.free_keys_);
         std::swap(free_key_, other.free_key_);
+
+        // Swap lazy indexing state
+        bool this_indexed = keys_indexed_.load(std::memory_order_relaxed);
+        bool other_indexed = other.keys_indexed_.load(std::memory_order_relaxed);
+        keys_indexed_.store(other_indexed, std::memory_order_relaxed);
+        other.keys_indexed_.store(this_indexed, std::memory_order_relaxed);
     }
 
     ~index_dense_gt() {
@@ -807,6 +839,7 @@ class index_dense_gt {
      */
     aggregated_distances_t distance_between(vector_key_t a, vector_key_t b, std::size_t = any_thread()) const {
         usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled!");
+        ensure_keys_indexed_();
         shared_lock_t lock(slot_lookup_mutex_);
         aggregated_distances_t result;
         if (!multi()) {
@@ -818,9 +851,9 @@ class index_dense_gt {
                 return result;
 
             key_and_slot_t a_key_and_slot = *a_it;
-            byte_t const* a_vector = vectors_lookup_[a_key_and_slot.slot];
+            byte_t const* a_vector = vector_data_at_slot_(a_key_and_slot.slot);
             key_and_slot_t b_key_and_slot = *b_it;
-            byte_t const* b_vector = vectors_lookup_[b_key_and_slot.slot];
+            byte_t const* b_vector = vector_data_at_slot_(b_key_and_slot.slot);
             distance_t a_b_distance = metric_(a_vector, b_vector);
 
             result.mean = result.min = result.max = a_b_distance;
@@ -842,10 +875,10 @@ class index_dense_gt {
 
         while (a_range.first != a_range.second) {
             key_and_slot_t a_key_and_slot = *a_range.first;
-            byte_t const* a_vector = vectors_lookup_[a_key_and_slot.slot];
+            byte_t const* a_vector = vector_data_at_slot_(a_key_and_slot.slot);
             while (b_range.first != b_range.second) {
                 key_and_slot_t b_key_and_slot = *b_range.first;
-                byte_t const* b_vector = vectors_lookup_[b_key_and_slot.slot];
+                byte_t const* b_vector = vector_data_at_slot_(b_key_and_slot.slot);
                 distance_t a_b_distance = metric_(a_vector, b_vector);
 
                 result.mean += a_b_distance;
@@ -867,8 +900,10 @@ class index_dense_gt {
      *  @brief  Identifies a node in a given `level`, that is the closest to the `key`.
      */
     cluster_result_t cluster(vector_key_t key, std::size_t level, std::size_t thread = any_thread()) const {
+        usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled!");
 
         // Check if such `key` is even present.
+        ensure_keys_indexed_();
         shared_lock_t slots_lock(slot_lookup_mutex_);
         auto key_range = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
         cluster_result_t result;
@@ -886,7 +921,7 @@ class index_dense_gt {
         // Find the closest cluster for any vector under that key.
         while (key_range.first != key_range.second) {
             key_and_slot_t key_and_slot = *key_range.first;
-            byte_t const* vector_data = vectors_lookup_[key_and_slot.slot];
+            byte_t const* vector_data = vector_data_at_slot_(key_and_slot.slot);
             cluster_result_t new_result = typed_->cluster(vector_data, level, metric, cluster_config, allow);
             if (!new_result)
                 return new_result;
@@ -906,8 +941,10 @@ class index_dense_gt {
      */
     bool try_reserve(index_limits_t limits) {
 
+        bool immutable = typed_ && typed_->is_immutable();
+
         // The slot lookup system will generally prefer power-of-two sizes.
-        if (config_.enable_key_lookups) {
+        if (config_.enable_key_lookups && !immutable) {
             unique_lock_t lock(slot_lookup_mutex_);
             if (!slot_lookup_.try_reserve(limits.members))
                 return false;
@@ -917,7 +954,7 @@ class index_dense_gt {
         // Once the `slot_lookup_` grows, let's use its capacity as the new
         // target for the `vectors_lookup_` to synchronize allocations and
         // expensive index re-organizations.
-        if (limits.members != vectors_lookup_.size()) {
+        if (!immutable && limits.members != vectors_lookup_.size()) {
             vectors_lookup_t new_vectors_lookup(limits.members);
             if (!new_vectors_lookup)
                 return false;
@@ -962,8 +999,12 @@ class index_dense_gt {
         typed_->clear();
         slot_lookup_.clear();
         vectors_lookup_.reset();
+        vectors_view_base_ = nullptr;
+        vectors_view_stride_ = 0;
+        vectors_view_count_ = 0;
         free_keys_.clear();
         vectors_tape_allocator_.reset();
+        keys_indexed_.store(true, std::memory_order_release);
     }
 
     /**
@@ -983,9 +1024,13 @@ class index_dense_gt {
             typed_->reset();
         slot_lookup_.clear();
         vectors_lookup_.reset();
+        vectors_view_base_ = nullptr;
+        vectors_view_stride_ = 0;
+        vectors_view_count_ = 0;
         free_keys_.clear();
         vectors_tape_allocator_.reset();
         available_threads_.reset();
+        keys_indexed_.store(true, std::memory_order_release);
     }
 
     /**
@@ -1023,7 +1068,7 @@ class index_dense_gt {
 
             // Dump the vectors one after another
             for (std::uint64_t i = 0; i != matrix_rows; ++i) {
-                byte_t* vector = vectors_lookup_[i];
+                byte_t const* vector = vector_data_at_slot_(static_cast<compressed_slot_t>(i));
                 if (!output(vector, matrix_cols))
                     return result.failed("Failed to serialize into stream");
             }
@@ -1290,13 +1335,25 @@ class index_dense_gt {
         if (!typed_->try_reserve(old_limits))
             return result.failed("Failed to reserve memory for the index");
 
-        // Address the vectors
-        vectors_lookup_ = vectors_lookup_t(matrix_rows);
-        if (!vectors_lookup_)
-            return result.failed("Failed to allocate memory to address vectors");
-        if (!config.exclude_vectors)
-            for (std::uint64_t slot = 0; slot != matrix_rows; ++slot)
-                vectors_lookup_[slot] = (byte_t*)vectors_buffer.data() + matrix_cols * slot;
+        // Address the vectors.
+        // In view-mode, vectors are stored contiguously in the memory-mapped file, so we can compute
+        // addresses on-demand and avoid building an O(n) pointer table.
+        vectors_view_base_ = nullptr;
+        vectors_view_stride_ = 0;
+        vectors_view_count_ = 0;
+        if (!config.exclude_vectors) {
+            vectors_view_base_ = vectors_buffer.data();
+            vectors_view_stride_ = static_cast<std::size_t>(matrix_cols);
+            vectors_view_count_ = static_cast<std::size_t>(matrix_rows);
+            vectors_lookup_.reset();
+        } else {
+            // Preserve the ability to attach vectors later by allocating a pointer table.
+            vectors_lookup_ = vectors_lookup_t(matrix_rows);
+            if (!vectors_lookup_)
+                return result.failed("Failed to allocate memory to address vectors");
+            if (matrix_rows)
+                std::memset(vectors_lookup_.data(), 0, static_cast<std::size_t>(matrix_rows) * sizeof(byte_t*));
+        }
 
         // After the index is loaded, we may have to resize the `available_threads_` to
         // match the limits of the underlying engine.
@@ -1308,7 +1365,9 @@ class index_dense_gt {
             available_threads.push(i);
         available_threads_ = std::move(available_threads);
 
-        reindex_keys_();
+        // Defer key reindexing for lazy initialization on first key access in view mode.
+        // This keeps `view()` near-instant even with `enable_key_lookups=true`.
+        keys_indexed_.store(!config_.enable_key_lookups, std::memory_order_release);
         return result;
     }
 
@@ -1443,6 +1502,7 @@ class index_dense_gt {
      */
     bool contains(vector_key_t key) const {
         usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        ensure_keys_indexed_();
         shared_lock_t lock(slot_lookup_mutex_);
         return slot_lookup_.contains(key_and_slot_t::any_slot(key));
     }
@@ -1453,6 +1513,7 @@ class index_dense_gt {
      */
     std::size_t count(vector_key_t key) const {
         usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        ensure_keys_indexed_();
         shared_lock_t lock(slot_lookup_mutex_);
         return slot_lookup_.count(key_and_slot_t::any_slot(key));
     }
@@ -1481,6 +1542,7 @@ class index_dense_gt {
         labeling_result_t result;
         if (typed_->is_immutable())
             return result.failed("Can't remove from an immutable index");
+        ensure_keys_indexed_();
 
         unique_lock_t lookup_lock(slot_lookup_mutex_);
         auto matching_slots = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
@@ -1521,6 +1583,7 @@ class index_dense_gt {
     template <typename keys_iterator_at>
     labeling_result_t remove(keys_iterator_at keys_begin, keys_iterator_at keys_end) {
         usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        ensure_keys_indexed_();
 
         labeling_result_t result;
         unique_lock_t lookup_lock(slot_lookup_mutex_);
@@ -1566,6 +1629,7 @@ class index_dense_gt {
      */
     labeling_result_t rename(vector_key_t from, vector_key_t to) {
         labeling_result_t result;
+        ensure_keys_indexed_();
         unique_lock_t lookup_lock(slot_lookup_mutex_);
 
         if (!multi() && slot_lookup_.contains(key_and_slot_t::any_slot(to)))
@@ -1593,6 +1657,7 @@ class index_dense_gt {
      *  @param[in] limit The maximum number of keys to export, that can fit in ::keys.
      */
     void export_keys(vector_key_t* keys, std::size_t offset, std::size_t limit) const {
+        ensure_keys_indexed_();
         shared_lock_t lock(slot_lookup_mutex_);
         offset = (std::min)(offset, slot_lookup_.size());
         slot_lookup_.for_each([&](key_and_slot_t const& key_and_slot) {
@@ -1613,6 +1678,7 @@ class index_dense_gt {
      *  @return A copy of the ::index_dense_gt instance.
      */
     copy_result_t copy(index_dense_copy_config_t config = {}) const {
+        ensure_keys_indexed_();
         copy_result_t result = fork();
         if (!result)
             return result;
@@ -1629,11 +1695,20 @@ class index_dense_gt {
             copy.free_keys_.push(free_keys_[i]);
 
         // Allocate buffers and move the vectors themselves
-        copy.vectors_lookup_ = vectors_lookup_t(vectors_lookup_.size());
+        std::size_t source_vectors = vectors_lookup_.size();
+        if (!source_vectors && vectors_view_base_)
+            source_vectors = typed_result.index.size();
+        copy.vectors_lookup_ = vectors_lookup_t(source_vectors);
         if (!copy.vectors_lookup_)
             return result.failed("Out of memory!");
         if (!config.force_vector_copy && copy.config_.exclude_vectors) {
-            std::memcpy(copy.vectors_lookup_.data(), vectors_lookup_.data(), vectors_lookup_.size() * sizeof(byte_t*));
+            if (vectors_lookup_.size())
+                std::memcpy(copy.vectors_lookup_.data(), vectors_lookup_.data(),
+                            vectors_lookup_.size() * sizeof(byte_t*));
+            else if (vectors_view_base_) {
+                for (std::size_t slot = 0; slot != source_vectors; ++slot)
+                    copy.vectors_lookup_[slot] = (byte_t*)vector_data_at_slot_(static_cast<compressed_slot_t>(slot));
+            }
         } else {
             std::size_t slots_count = typed_result.index.size();
             for (std::size_t slot = 0; slot != slots_count; ++slot)
@@ -1641,7 +1716,8 @@ class index_dense_gt {
             if (std::count(copy.vectors_lookup_.begin(), copy.vectors_lookup_.begin() + slots_count, nullptr))
                 return result.failed("Out of memory!");
             for (std::size_t slot = 0; slot != slots_count; ++slot)
-                std::memcpy(copy.vectors_lookup_[slot], vectors_lookup_[slot], metric_.bytes_per_vector());
+                std::memcpy(copy.vectors_lookup_[slot], vector_data_at_slot_(static_cast<compressed_slot_t>(slot)),
+                            metric_.bytes_per_vector());
         }
 
         copy.slot_lookup_ = slot_lookup_; // TODO: Handle out of memory
@@ -1724,8 +1800,8 @@ class index_dense_gt {
 
       public:
         values_proxy_t(index_dense_gt const& index) noexcept : index_(&index) {}
-        byte_t const* operator[](compressed_slot_t slot) const noexcept { return index_->vectors_lookup_[slot]; }
-        byte_t const* operator[](member_citerator_t it) const noexcept { return index_->vectors_lookup_[get_slot(it)]; }
+        byte_t const* operator[](compressed_slot_t slot) const noexcept { return index_->vector_data_at_slot_(slot); }
+        byte_t const* operator[](member_citerator_t it) const noexcept { return index_->vector_data_at_slot_(get_slot(it)); }
     };
 
     /**
@@ -1739,6 +1815,8 @@ class index_dense_gt {
     template <typename executor_at = dummy_executor_t, typename progress_at = dummy_progress_t>
     compaction_result_t compact(executor_at&& executor = executor_at{}, progress_at&& progress = progress_at{}) {
         compaction_result_t result;
+        if (typed_ && typed_->is_immutable())
+            return result.failed("Can't compact an immutable index");
 
         vectors_lookup_t new_vectors_lookup(vectors_lookup_.size());
         if (!new_vectors_lookup)
@@ -1748,7 +1826,7 @@ class index_dense_gt {
 
         auto track_slot_change = [&](vector_key_t, compressed_slot_t old_slot, compressed_slot_t new_slot) {
             byte_t* new_vector = new_vectors_allocator.allocate(metric_.bytes_per_vector());
-            byte_t* old_vector = vectors_lookup_[old_slot];
+            byte_t const* old_vector = vector_data_at_slot_(old_slot);
             std::memcpy(new_vector, old_vector, metric_.bytes_per_vector());
             new_vectors_lookup[new_slot] = new_vector;
         };
@@ -1876,7 +1954,7 @@ class index_dense_gt {
 
             // Export in case we need to refine afterwards
             clusters[query_idx].centroid = result.cluster.member.key;
-            clusters[query_idx].vector = vectors_lookup_[result.cluster.member.slot];
+            clusters[query_idx].vector = vector_data_at_slot_(static_cast<compressed_slot_t>(result.cluster.member.slot));
             clusters[query_idx].merged_into = free_key();
             clusters[query_idx].popularity = 1;
 
@@ -2125,6 +2203,7 @@ class index_dense_gt {
 
         // Check if such `key` is even present.
         usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled!");
+        ensure_keys_indexed_();
         shared_lock_t slots_lock(slot_lookup_mutex_);
         auto key_range = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
         aggregated_distances_t result;
@@ -2138,7 +2217,7 @@ class index_dense_gt {
 
         while (key_range.first != key_range.second) {
             key_and_slot_t key_and_slot = *key_range.first;
-            byte_t const* a_vector = vectors_lookup_[key_and_slot.slot];
+            byte_t const* a_vector = vector_data_at_slot_(key_and_slot.slot);
             byte_t const* b_vector = vector_data;
             distance_t a_b_distance = metric_(a_vector, b_vector);
 
@@ -2155,7 +2234,18 @@ class index_dense_gt {
         return result;
     }
 
-    void reindex_keys_() {
+    void reindex_keys_unsafe_() {
+
+        slot_lookup_.clear();
+        std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
+        free_keys_.clear();
+
+        // Early exit for immutable indexes with key lookups disabled.
+        // In view mode we can't add entries, so we don't need `slot_lookup_` or `free_keys_`.
+        if (!config_.enable_key_lookups && typed_ && typed_->is_immutable()) {
+            keys_indexed_.store(true, std::memory_order_release);
+            return;
+        }
 
         // Estimate number of entries first
         std::size_t count_total = typed_->size();
@@ -2166,16 +2256,13 @@ class index_dense_gt {
             count_removed += member.key == free_key_;
         }
 
-        if (!count_removed && !config_.enable_key_lookups)
+        if (!count_removed && !config_.enable_key_lookups) {
+            keys_indexed_.store(true, std::memory_order_release);
             return;
+        }
 
-        // Pull entries from the underlying `typed_` into either
-        // into `slot_lookup_`, or `free_keys_` if they are unused.
-        unique_lock_t lock(slot_lookup_mutex_);
-        slot_lookup_.clear();
         if (config_.enable_key_lookups)
             slot_lookup_.reserve(count_total - count_removed);
-        free_keys_.clear();
         free_keys_.reserve(count_removed);
         for (std::size_t i = 0; i != typed_->size(); ++i) {
             auto member_slot = static_cast<compressed_slot_t>(i);
@@ -2185,12 +2272,36 @@ class index_dense_gt {
             else if (config_.enable_key_lookups)
                 slot_lookup_.try_emplace(key_and_slot_t{vector_key_t(member.key), member_slot});
         }
+
+        keys_indexed_.store(true, std::memory_order_release);
+    }
+
+    void reindex_keys_() {
+        unique_lock_t lock(slot_lookup_mutex_);
+        reindex_keys_unsafe_();
+    }
+
+    /**
+     *  @brief Ensures key lookups are indexed, performing lazy initialization if needed.
+     *  Thread-safe via double-checked locking pattern.
+     *  Safe to call from const methods as slot_lookup_/free_keys_ are mutable.
+     */
+    void ensure_keys_indexed_() const {
+        if (keys_indexed_.load(std::memory_order_acquire))
+            return;
+
+        unique_lock_t lock(slot_lookup_mutex_);
+        if (keys_indexed_.load(std::memory_order_relaxed))
+            return;
+
+        const_cast<index_dense_gt*>(this)->reindex_keys_unsafe_();
     }
 
     template <typename scalar_at>
     std::size_t get_(vector_key_t key, scalar_at* reconstructed, std::size_t vectors_limit,
                      cast_punned_t const& cast) const {
 
+        ensure_keys_indexed_();
         if (!multi()) {
             compressed_slot_t slot;
             // Find the matching ID
@@ -2202,7 +2313,7 @@ class index_dense_gt {
                 slot = (*it).slot;
             }
             // Export the entry
-            byte_t const* punned_vector = reinterpret_cast<byte_t const*>(vectors_lookup_[slot]);
+            byte_t const* punned_vector = reinterpret_cast<byte_t const*>(vector_data_at_slot_(slot));
             bool casted = cast(punned_vector, dimensions(), (byte_t*)reconstructed);
             if (!casted)
                 std::memcpy(reconstructed, punned_vector, metric_.bytes_per_vector());
@@ -2215,7 +2326,7 @@ class index_dense_gt {
                  begin != equal_range_pair.second && count_exported != vectors_limit; ++begin, ++count_exported) {
                 //
                 compressed_slot_t slot = (*begin).slot;
-                byte_t const* punned_vector = reinterpret_cast<byte_t const*>(vectors_lookup_[slot]);
+                byte_t const* punned_vector = reinterpret_cast<byte_t const*>(vector_data_at_slot_(slot));
                 byte_t* reconstructed_vector = (byte_t*)reconstructed + metric_.bytes_per_vector() * count_exported;
                 bool casted = cast(punned_vector, dimensions(), reconstructed_vector);
                 if (!casted)
