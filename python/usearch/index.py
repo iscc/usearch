@@ -200,6 +200,9 @@ def _search_in_compiled(
     assert isinstance(vectors, np.ndarray), "Expects a NumPy array"
     assert vectors.ndim == 1 or vectors.ndim == 2, "Expects a matrix or vector"
     assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback"
+    count = kwargs.get("count", None)
+    if count is not None and count < 1:
+        raise ValueError("`count` must be >= 1")
 
     if vectors.ndim == 1:
         vectors = vectors.reshape(1, len(vectors))

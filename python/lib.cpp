@@ -418,7 +418,7 @@ static py::tuple search_many_in_index( //
     progress_func_t const& progress) {
 
     if (wanted == 0)
-        return py::tuple(5);
+        throw std::invalid_argument("`count` must be >= 1");
 
     // Clamp threads to hardware limit instead of throwing
     threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
@@ -473,7 +473,7 @@ static py::tuple search_many_brute_force(       //
     progress_func_t const& progress_func) {
 
     if (wanted == 0)
-        return py::tuple(5);
+        throw std::invalid_argument("`count` must be >= 1");
 
     py::buffer_info dataset_info = dataset.request();
     py::buffer_info queries_info = queries.request();
