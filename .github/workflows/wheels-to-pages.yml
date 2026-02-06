@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ['310', '311', '312', '313']
+        python-version: ['310', '311', '312', '313', '314']
 
     steps:
       - name: Checkout
@@ -179,7 +179,7 @@ jobs:
           ## Available Wheels
 
           This index contains {len(wheels)} wheels for:
-          - Python versions: 3.10, 3.11, 3.12, 3.13
+          - Python versions: 3.10, 3.11, 3.12, 3.13, 3.14
           - Platforms:
             - Linux: manylinux (x86_64, aarch64), musllinux (x86_64, aarch64)
             - macOS: universal2 (x86_64 + arm64), x86_64, arm64
