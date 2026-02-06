@@ -104,7 +104,7 @@ jobs:
           # Create directory structure
           index_dir = Path("pypi-index")
           index_dir.mkdir(exist_ok=True)
-          usearch_dir = index_dir / "usearch"
+          usearch_dir = index_dir / "usearch-iscc"
           usearch_dir.mkdir(exist_ok=True)
 
           # Get all wheel files
@@ -126,7 +126,7 @@ jobs:
           </head>
           <body>
               <h1>Simple index</h1>
-              <a href="usearch/">usearch</a><br/>
+              <a href="usearch-iscc/">usearch-iscc</a><br/>
           </body>
           </html>
           """
@@ -139,10 +139,10 @@ jobs:
           <html>
           <head>
               <meta name="pypi:repository-version" content="1.0">
-              <title>Links for usearch</title>
+              <title>Links for usearch-iscc</title>
           </head>
           <body>
-              <h1>Links for usearch</h1>
+              <h1>Links for usearch-iscc</h1>
           """
 
           for wheel in sorted(usearch_dir.glob("*.whl")):
@@ -245,10 +245,30 @@ jobs:
 
       - name: Display deployment URL
         run: |
-          echo "✅ Deployment successful!"
-          echo "📦 Package index available at: ${{ steps.deployment.outputs.page_url }}"
+          echo "Deployment successful!"
+          echo "Package index available at: ${{ steps.deployment.outputs.page_url }}"
           echo ""
           echo "To use in your project:"
           echo ""
           echo "[[tool.uv.index]]"
           echo "url = \"${{ steps.deployment.outputs.page_url }}\""
+
+  publish_pypi:
+    name: Publish to PyPI
+    needs: build_wheels
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Publish to PyPI
+        run: uv publish dist/*.whl
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}

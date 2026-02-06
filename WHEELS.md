@@ -1,94 +1,56 @@
-# Using USearch from GitHub Pages Python Index
+# Installing usearch-iscc
 
-This fork of USearch publishes prebuilt binary Python wheels to a GitHub Pages hosted package index. This allows
-you to use the patched version in your projects without any platform-specific configuration.
+This fork of USearch is published on PyPI as
+[`usearch-iscc`](https://pypi.org/project/usearch-iscc/). The Python import name remains `usearch` for
+compatibility with the upstream API.
 
-## For Package Users
+## Installation
 
-### Quick Install with UV
-
-Simply add our package index to your project and install like any other package:
+### From PyPI (Recommended)
 
 ```bash
-uv pip install usearch --index-url https://iscc.github.io/usearch/
+pip install usearch-iscc
 ```
 
-### Using in pyproject.toml (Recommended)
+Or with uv:
 
-Add to your project's `pyproject.toml`:
+```bash
+uv pip install usearch-iscc
+```
+
+### Using in pyproject.toml
 
 ```toml
 [project]
 dependencies = [
-    "usearch",  # No platform-specific URL needed!
+    "usearch-iscc>=2.23.3",
 ]
-
-[[tool.uv.index]]
-url = "https://iscc.github.io/usearch/"
 ```
 
-Then install:
+### From GitHub Pages Index (Alternative)
+
+A PEP 503 compliant package index is also available on GitHub Pages:
 
 ```bash
-uv sync
+pip install usearch-iscc --extra-index-url https://iscc.github.io/usearch/
 ```
 
-**UV automatically selects the correct wheel for your platform!**
-
-### Using with pip
-
-```bash
-pip install usearch --index-url https://iscc.github.io/usearch/
-```
-
-Or in `requirements.txt`:
-
-```
---index-url https://iscc.github.io/usearch/
-usearch
-```
-
-### Combining with PyPI
-
-If your project uses both public PyPI packages and our patched usearch:
+Or in `pyproject.toml` with uv:
 
 ```toml
-[project]
-dependencies = [
-    "usearch",
-    "numpy",
-    "scipy",
-]
-
-[tool.uv]
-index-url = "https://pypi.org/simple"
-
 [[tool.uv.index]]
 url = "https://iscc.github.io/usearch/"
 ```
-
-UV will look for packages in PyPI first, then fall back to our index for `usearch`.
 
 ## Available Platforms
 
 Pre-built wheels are available for:
 
-- **Python versions:** 3.10, 3.11, 3.12, 3.13
+- **Python versions:** 3.10, 3.11, 3.12, 3.13, 3.14
 - **Operating systems:**
-    - Linux (x86_64) - manylinux2014
-    - macOS (x86_64)
-    - Windows (x86_64)
-
-## How It Works
-
-When you add our GitHub Pages URL as a package index:
-
-1. UV queries the index for available `usearch` packages
-2. Finds all wheels for different platforms and Python versions
-3. Automatically downloads the correct wheel for your system
-4. Installs it like any PyPI package
-
-**No platform detection needed in your configuration!**
+    - Linux: x86_64, aarch64 (manylinux_2_28, musllinux_1_2)
+    - macOS: x86_64, arm64, universal2
+    - Windows: AMD64, ARM64
 
 ## For Maintainers
 
@@ -100,66 +62,30 @@ The build and deployment process is fully automated:
 
 2. **Create and push a version tag:**
    ```bash
-   git tag v2.21.1-patched
-   git push origin v2.21.1-patched
+   git tag v2.23.3
+   git push origin v2.23.3
    ```
 
 3. **GitHub Actions automatically:**
-    - Builds wheels for all supported platforms (12 wheels total)
-    - Generates a PEP 503 compliant index
-    - Deploys to GitHub Pages at `https://iscc.github.io/usearch/`
+    - Builds wheels for all supported platforms via cibuildwheel
+    - Publishes wheels to PyPI
+    - Generates a PEP 503 compliant index on GitHub Pages
 
 4. **Monitor the build:**
     - Visit: https://github.com/iscc/usearch/actions
     - Workflow: "Build and Publish Wheels to GitHub Pages"
-    - Duration: ~15-20 minutes
 
 5. **Verify deployment:**
-    - Check: https://iscc.github.io/usearch/
-    - Browse to: https://iscc.github.io/usearch/usearch/ to see all wheels
+    - PyPI: https://pypi.org/project/usearch-iscc/
+    - GitHub Pages: https://iscc.github.io/usearch/
 
 ### Build Configuration
 
 The workflow builds wheels with:
 
-- **Python versions:** 3.10, 3.11, 3.12, 3.13 (no PyPy)
-- **Architecture:** x86_64 only (no ARM builds for speed)
-- **Platforms:** Linux (manylinux2014), macOS, Windows
-- **Optimizations:**
-    - Parallel builds across all platforms
-    - GitHub Actions cache for pip packages
-    - Skip tests during wheel building (run tests separately)
-
-### Expected Wheel Count
-
-For each release, expect **12 wheels**:
-- 4 Python versions × 3 platforms = 12 wheels
-
-Example:
-```
-usearch-2.21.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-usearch-2.21.0-cp310-cp310-macosx_10_9_x86_64.whl
-usearch-2.21.0-cp310-cp310-win_amd64.whl
-... (9 more)
-```
-
-### Troubleshooting Builds
-
-**Build fails on specific platform:**
-- Check the Actions log for detailed error messages
-- Common issues: missing dependencies, compilation errors
-- Test locally with: `cibuildwheel --platform linux`
-
-**GitHub Pages not updating:**
-- Verify GitHub Pages is enabled in repository Settings → Pages
-- Source should be: "GitHub Actions"
-- Check the "deploy_pages" job completed successfully
-- Pages updates can take 1-2 minutes to propagate
-
-**Wheels not being found by UV:**
-- Verify the index structure at https://iscc.github.io/usearch/usearch/
-- Check that `index.html` exists and lists wheels
-- Ensure wheel filenames follow PEP 427 naming convention
+- **Python versions:** 3.10, 3.11, 3.12, 3.13, 3.14 (no PyPy)
+- **Platforms:** Linux (manylinux_2_28, musllinux_1_2), macOS, Windows
+- **Architectures:** x86_64, aarch64/arm64, universal2 (macOS)
 
 ### Testing Locally
 
@@ -179,23 +105,18 @@ python -c "import usearch; print(usearch.__version__)"
 
 ### Manually Triggering Builds
 
-If needed, you can manually trigger the workflow:
+If needed, you can retag to trigger a rebuild:
 
 ```bash
-# Retag to trigger rebuild
-git tag -d v2.21.0-patched
-git push origin :refs/tags/v2.21.0-patched
-git tag v2.21.0-patched
-git push origin v2.21.0-patched
+git tag -d v2.23.3
+git push origin :refs/tags/v2.23.3
+git tag v2.23.3
+git push origin v2.23.3
 ```
 
 ## Version Numbering
 
-This fork follows this versioning scheme:
-
-- **Base version:** Matches upstream (e.g., `2.21.0`)
-- **Tag suffix:** `-patched` to indicate fork (e.g., `v2.21.0-patched`)
-- **Multiple patches:** Use `-patch.N` for iterations (e.g., `v2.21.0-patch.2`)
+This fork follows the upstream version scheme (e.g., `2.23.3`). Tags use the format `v2.23.3`.
 
 ## Differences from Upstream
 
@@ -212,16 +133,6 @@ git log --oneline upstream/main..main
 # View full diff
 git diff upstream/main..main
 ```
-
-## Why GitHub Pages Instead of PyPI?
-
-- ✅ No PyPI account needed
-- ✅ No name conflicts with official package
-- ✅ Full version control through Git
-- ✅ Free hosting
-- ✅ Works seamlessly with UV and pip
-- ✅ Can include experimental patches without affecting upstream
-- ✅ Fast deployment (no review process)
 
 ## License
 

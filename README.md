@@ -47,6 +47,14 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 
 ---
 
+> **ISCC Foundation Fork** -- This is a maintained fork of [USearch](https://github.com/unum-cloud/usearch)
+> by the [ISCC Foundation](https://iscc.io), published on PyPI as
+> [`usearch-iscc`](https://pypi.org/project/usearch-iscc/). It includes bug fixes and patches not yet
+> available upstream. The Python import name remains `usearch` for compatibility. Install with:
+> `pip install usearch-iscc`
+
+---
+
 - ✅ __[10x faster][faster-than-faiss]__ [HNSW][hnsw-algorithm] implementation than [FAISS][faiss].
 - ✅ Simple and extensible [single C++11 header][usearch-header] __library__.
 - ✅ [Trusted](#integrations) by giants like Google and DBs like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs].

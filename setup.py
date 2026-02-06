@@ -144,7 +144,7 @@ ext_modules = [
 ]
 
 __version__ = open("VERSION", "r").read().strip()
-__lib_name__ = "usearch"
+__lib_name__ = "usearch-iscc"
 
 this_directory = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(this_directory, "README.md"), encoding="utf-8") as f:
@@ -181,10 +181,14 @@ setup(
     version=__version__,
     packages=["usearch"],
     package_dir={"usearch": "python/usearch"},
-    description="Smaller & Faster Single-File Vector Search Engine from Unum (Patched Fork)",
+    description="Smaller & Faster Single-File Vector Search Engine from Unum (ISCC Foundation Fork)",
     author="Titusz Pan (fork maintainer)",
     author_email="tp@py7.de",
     url="https://github.com/iscc/usearch",
+    project_urls={
+        "Upstream": "https://github.com/unum-cloud/usearch",
+        "Fork": "https://github.com/iscc/usearch",
+    },
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",
