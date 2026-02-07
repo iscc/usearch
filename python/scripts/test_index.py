@@ -64,6 +64,16 @@ def reset_randomness():
     np.random.seed(int(time()))
 
 
+def packed_uuid_keys(batch_size: int) -> np.ndarray:
+    keys = np.empty(batch_size, dtype=np.dtype("V16"))
+    for i in range(batch_size):
+        body = (i + 1).to_bytes(8, byteorder="big", signed=False)
+        offset = (i * 13).to_bytes(4, byteorder="big", signed=False)
+        size = (100 + i).to_bytes(4, byteorder="big", signed=False)
+        keys[i] = body + offset + size
+    return keys
+
+
 @pytest.mark.parametrize("ndim", [3, 97, 256])
 @pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
 @pytest.mark.parametrize("batch_size", [1, 7, 1024])
@@ -370,6 +380,65 @@ def test_index_contains_remove_rename(batch_size):
 
     renamed_counts = index.rename(remaining_keys, removed_keys)
     assert np.sum(index.count(removed_keys)) == len(index)
+
+
+def test_index_uuid128_workflow():
+    reset_randomness()
+
+    ndim = 8
+    batch_size = 16
+    index = Index(ndim=ndim, multi=False, key_kind="uuid")
+    keys = packed_uuid_keys(batch_size)
+    vectors = random_vectors(count=batch_size, ndim=ndim)
+
+    index.add(keys, vectors, threads=threads)
+    assert np.all(index.contains(keys))
+    assert np.all(index.count(keys) == np.ones(batch_size))
+
+    single_key = keys[0].tobytes()
+    assert index.contains(single_key)
+    assert index.count(single_key) == 1
+    assert np.allclose(index.get(single_key), vectors[0], atol=0.1)
+
+    matches: BatchMatches = index.search(vectors, 1, threads=threads)
+    assert np.all(matches.keys[:, 0] == keys)
+
+    removed_keys = keys[: batch_size // 2]
+    remaining_keys = keys[batch_size // 2 :]
+    index.remove(removed_keys)
+    assert np.sum(index.count(removed_keys)) == 0
+    assert np.sum(index.contains(keys)) == len(remaining_keys)
+
+    index.rename(remaining_keys, removed_keys)
+    assert np.sum(index.count(removed_keys)) == len(index)
+
+
+def test_index_uuid128_save_load_view_roundtrip_and_mismatch():
+    reset_randomness()
+
+    ndim = 16
+    batch_size = 32
+    index = Index(ndim=ndim, multi=False, key_kind="uuid")
+    keys = packed_uuid_keys(batch_size)
+    vectors = random_vectors(count=batch_size, ndim=ndim)
+    index.add(keys, vectors, threads=threads)
+
+    dumped = index.save()
+    loaded = Index(ndim=ndim, multi=False, key_kind="uuid")
+    loaded.load(dumped)
+    viewed = Index(ndim=ndim, multi=False, key_kind="uuid")
+    viewed.view(dumped)
+
+    loaded_keys = loaded.keys.__array__()
+    viewed_keys = viewed.keys.__array__()
+    assert set(key.tobytes() for key in loaded_keys) == set(key.tobytes() for key in keys)
+    assert set(key.tobytes() for key in viewed_keys) == set(key.tobytes() for key in keys)
+    assert np.allclose(np.vstack(loaded.get(keys)), np.vstack(index.get(keys)), atol=0.1)
+
+    index.save("tmp-uuid.usearch")
+    with pytest.raises(ValueError, match="Key kind mismatch"):
+        Index(ndim=ndim, multi=False).load("tmp-uuid.usearch")
+    os.remove("tmp-uuid.usearch")
 
 
 @pytest.mark.skip(reason="Not guaranteed")

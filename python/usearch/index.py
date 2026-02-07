@@ -28,6 +28,7 @@ from tqdm import tqdm
 # Precompiled symbols that won't be exposed directly:
 from usearch.compiled import (
     Index as _CompiledIndex,
+    IndexBig as _CompiledIndexBig,
     Indexes as _CompiledIndexes,
     IndexStats as _CompiledIndexStats,
     index_dense_metadata_from_path as _index_dense_metadata_from_path,
@@ -70,10 +71,22 @@ else:
     TypeAlias = object  # Fallback for older Python versions
 
 Key: TypeAlias = np.uint64
+UUIDKey: TypeAlias = bytes
+UUIDKeyArray: TypeAlias = np.ndarray
 
 NoneType: TypeAlias = type(None)
 
-KeyOrKeysLike = Union[Key, Iterable[Key], int, Iterable[int], np.ndarray, memoryview]
+KeyOrKeysLike = Union[
+    Key,
+    UUIDKey,
+    Iterable[Key],
+    Iterable[UUIDKey],
+    int,
+    Iterable[int],
+    np.ndarray,
+    memoryview,
+    bytearray,
+]
 
 VectorOrVectorsLike = Union[np.ndarray, Iterable[np.ndarray], memoryview]
 
@@ -86,6 +99,8 @@ BytesLike = Union[bytes, bytearray, memoryview]
 PathOrBuffer = Union[str, os.PathLike, BytesLike]
 
 ProgressCallback = Callable[[int, int], bool]
+
+UUID_DTYPE = np.dtype("V16")
 
 
 def _match_signature(func: Callable[[Any], Any], arg_types: List[type], ret_type: type) -> bool:
@@ -188,6 +203,83 @@ def _is_buffer(obj: Any) -> bool:
         return False
 
 
+def _normalize_key_kind(key_kind) -> ScalarKind:
+    if key_kind is None or key_kind == "":
+        return ScalarKind.U64
+
+    if isinstance(key_kind, ScalarKind):
+        if key_kind not in (ScalarKind.U64, ScalarKind.UUID):
+            raise ValueError("`key_kind` must be ScalarKind.U64 or ScalarKind.UUID")
+        return key_kind
+
+    if isinstance(key_kind, str):
+        normalized = key_kind.lower().replace("-", "").replace("_", "")
+        lookup = {
+            "u64": ScalarKind.U64,
+            "uint64": ScalarKind.U64,
+            "int64": ScalarKind.U64,
+            "uuid": ScalarKind.UUID,
+            "u128": ScalarKind.UUID,
+            "uint128": ScalarKind.UUID,
+            "128": ScalarKind.UUID,
+        }
+        if normalized in lookup:
+            return lookup[normalized]
+
+    raise ValueError("`key_kind` must be one of: 'u64', 'uuid', ScalarKind.U64, ScalarKind.UUID")
+
+
+def _normalize_uuid_single_key(key) -> bytes:
+    if isinstance(key, np.void):
+        key = key.tobytes()
+    elif isinstance(key, bytearray):
+        key = bytes(key)
+    elif isinstance(key, memoryview):
+        key = key.tobytes()
+
+    if not isinstance(key, bytes) or len(key) != 16:
+        raise ValueError("Single 128-bit key must be `bytes` of length 16")
+
+    return key
+
+
+def _normalize_many_keys(keys, key_kind: ScalarKind) -> np.ndarray:
+    if key_kind == ScalarKind.UUID:
+        if not isinstance(keys, np.ndarray):
+            raise TypeError(
+                "Batch 128-bit keys must be a contiguous NumPy array with 16-byte itemsize (for example `dtype='V16'`)"
+            )
+        if keys.ndim != 1:
+            raise ValueError("Keys must be a one-dimensional array")
+        if keys.dtype.itemsize != 16:
+            raise ValueError("Batch 128-bit keys must use 16-byte items (for example `dtype='V16'`)")
+        if not keys.flags.c_contiguous:
+            raise ValueError("Batch 128-bit keys array must be C-contiguous")
+
+        keys = keys.view(UUID_DTYPE) if keys.dtype != UUID_DTYPE else keys
+        return keys
+
+    if not isinstance(keys, np.ndarray):
+        keys = np.array(keys, dtype=Key)
+    else:
+        keys = keys.astype(Key)
+    return keys
+
+
+def _is_many_keys(keys, key_kind: ScalarKind) -> bool:
+    if key_kind == ScalarKind.UUID:
+        if isinstance(keys, (bytes, bytearray, memoryview, np.void)):
+            return False
+        return isinstance(keys, Iterable)
+    return isinstance(keys, Iterable)
+
+
+def _normalize_single_key(key, key_kind: ScalarKind):
+    if key_kind == ScalarKind.UUID:
+        return _normalize_uuid_single_key(key)
+    return int(key)
+
+
 def _search_in_compiled(
     compiled_callable: Callable,
     vectors: np.ndarray,
@@ -248,6 +340,7 @@ def _search_in_compiled(
 def _add_to_compiled(
     compiled,
     *,
+    key_kind: ScalarKind,
     keys,
     vectors,
     copy: bool,
@@ -265,14 +358,26 @@ def _add_to_compiled(
     # Validate or generate the keys
     count_vectors = vectors.shape[0]
     generate_labels = keys is None
-    if generate_labels:
+    if generate_labels and key_kind == ScalarKind.U64:
         start_id = len(compiled)
         keys = np.arange(start_id, start_id + count_vectors, dtype=Key)
+    elif generate_labels:
+        raise ValueError("Automatic key generation is only supported for `key_kind='u64'`")
     else:
-        if not isinstance(keys, Iterable):
+        if not _is_many_keys(keys, key_kind):
             assert count_vectors == 1, "Each vector must have a key"
             keys = [keys]
-        keys = np.array(keys).astype(Key)
+
+        if key_kind == ScalarKind.UUID:
+            if not isinstance(keys, np.ndarray):
+                if count_vectors != 1:
+                    raise TypeError(
+                        "Batch 128-bit keys must be provided as a contiguous NumPy array with 16-byte itemsize"
+                    )
+                keys = np.array([_normalize_uuid_single_key(keys[0])], dtype=UUID_DTYPE)
+            keys = _normalize_many_keys(keys, key_kind)
+        else:
+            keys = _normalize_many_keys(keys, key_kind)
 
     assert len(keys) == count_vectors
 
@@ -307,7 +412,7 @@ def _add_to_compiled(
 class Match:
     """Single search result with key and distance."""
 
-    key: int
+    key: Any
     distance: float
 
     def to_tuple(self) -> tuple:
@@ -329,8 +434,11 @@ class Matches:
 
     def __getitem__(self, index: int) -> Match:
         if isinstance(index, int) and index < len(self):
+            key = self.keys[index]
+            if isinstance(key, np.void):
+                key = key.tobytes()
             return Match(
-                key=self.keys[index],
+                key=key,
                 distance=self.distances[index],
             )
         else:
@@ -338,7 +446,14 @@ class Matches:
 
     def to_list(self) -> List[tuple]:
         """Convert to list of (key, distance) tuples."""
-        return [(int(key), float(distance)) for key, distance in zip(self.keys, self.distances)]
+        pairs = []
+        for key, distance in zip(self.keys, self.distances):
+            if isinstance(key, np.void):
+                key = key.tobytes()
+            else:
+                key = int(key)
+            pairs.append((key, float(distance)))
+        return pairs
 
     def __repr__(self) -> str:
         return f"usearch.Matches({len(self)})"
@@ -476,7 +591,7 @@ class IndexedKeys(Sequence):
     def __getitem__(
         self,
         offset_offsets_or_slice: Union[int, np.ndarray, slice],
-    ) -> Union[Key, np.ndarray]:
+    ) -> Union[Key, UUIDKey, np.ndarray]:
         if isinstance(offset_offsets_or_slice, slice):
             start, stop, step = offset_offsets_or_slice.indices(len(self))
             if step != 1:
@@ -497,7 +612,7 @@ class IndexedKeys(Sequence):
 
     def __array__(self, dtype=None, copy=None) -> np.ndarray:
         if dtype is None:
-            dtype = Key
+            dtype = Key if self.index.key_kind == ScalarKind.U64 else UUID_DTYPE
         result = self.index._compiled.get_keys_in_slice().astype(dtype)
         if copy:
             result = result.copy()
@@ -507,8 +622,8 @@ class IndexedKeys(Sequence):
 class Index:
     """Fast approximate nearest neighbor search for dense vectors.
 
-    Supports various distance metrics (cosine, euclidean, inner product, etc.) 
-    and automatic precision optimization. Vector keys must be integers.
+    Supports various distance metrics (cosine, euclidean, inner product, etc.)
+    and automatic precision optimization.
     All vectors must have the same dimensionality.
 
     Example:
@@ -527,6 +642,7 @@ class Index:
         expansion_add: Optional[int] = None,
         expansion_search: Optional[int] = None,
         multi: bool = False,
+        key_kind: Union[str, ScalarKind] = "u64",
         path: Optional[os.PathLike] = None,
         view: bool = False,
         enable_key_lookups: bool = True,
@@ -577,6 +693,13 @@ class Index:
 
         :param multi: Allow multiple vectors with the same key
         :type multi: bool, defaults to True
+        :param key_kind: Key representation mode for index labels.
+        :type key_kind: Union[str, ScalarKind], defaults to "u64"
+            Use `"u64"` (default) for 64-bit integer keys.
+            Use `"uuid"` for 128-bit keys represented as 16-byte payloads.
+            In 128-bit mode, batch operations expect contiguous 1D arrays with
+            16-byte itemsize (for example NumPy `dtype='V16'`), and single-key
+            operations expect `bytes` of length 16.
         :param path: Where to store the index
         :type path: Optional[os.PathLike], defaults to None
         :param view: Are we simply viewing an immutable index
@@ -608,9 +731,12 @@ class Index:
         else:
             raise ValueError("The `metric` must be a `CompiledMetric` or a `MetricKind`")
 
+        self._key_kind = _normalize_key_kind(key_kind)
+
         # Validate, that the right scalar type is defined
         dtype = _normalize_dtype(dtype, ndim, self._metric_kind)
-        self._compiled = _CompiledIndex(
+        compiled_cls = _CompiledIndex if self._key_kind == ScalarKind.U64 else _CompiledIndexBig
+        self._compiled = compiled_cls(
             ndim=ndim,
             dtype=dtype,
             connectivity=connectivity,
@@ -649,6 +775,9 @@ class Index:
         if not meta:
             return None
 
+        if "key_kind" not in kwargs:
+            kwargs["key_kind"] = meta["kind_key"]
+
         index = Index(
             ndim=meta["dimensions"],
             dtype=meta["kind_scalar"],
@@ -681,9 +810,11 @@ class Index:
         should conform to the Python's "buffer protocol" spec.
 
         To index a single entry:
-            keys: int, vectors: np.ndarray.
+            keys: int (u64) or bytes of length 16 (uuid), vectors: np.ndarray.
         To index many entries:
             keys: np.ndarray, vectors: np.ndarray.
+        For uuid key_kind, batch keys must be a contiguous np.ndarray with
+        16-byte itemsize (e.g. dtype='V16').
 
         When working with extremely large indexes, you may want to
         pass `copy=False`, if you can guarantee the lifetime of the
@@ -706,6 +837,7 @@ class Index:
         """
         return _add_to_compiled(
             self._compiled,
+            key_kind=self._key_kind,
             keys=keys,
             vectors=vectors,
             copy=copy,
@@ -765,19 +897,17 @@ class Index:
         )
 
     def contains(self, keys: KeyOrKeysLike) -> Union[bool, np.ndarray]:
-        if isinstance(keys, Iterable):
-            return self._compiled.contains_many(np.array(keys, dtype=Key))
-        else:
-            return self._compiled.contains_one(int(keys))
+        if _is_many_keys(keys, self._key_kind):
+            return self._compiled.contains_many(_normalize_many_keys(keys, self._key_kind))
+        return self._compiled.contains_one(_normalize_single_key(keys, self._key_kind))
 
     def __contains__(self, keys: KeyOrKeysLike) -> Union[bool, np.ndarray]:
         return self.contains(keys)
 
     def count(self, keys: KeyOrKeysLike) -> Union[int, np.ndarray]:
-        if isinstance(keys, Iterable):
-            return self._compiled.count_many(np.array(keys, dtype=Key))
-        else:
-            return self._compiled.count_one(int(keys))
+        if _is_many_keys(keys, self._key_kind):
+            return self._compiled.count_many(_normalize_many_keys(keys, self._key_kind))
+        return self._compiled.count_one(_normalize_single_key(keys, self._key_kind))
 
     def get(
         self,
@@ -813,16 +943,14 @@ class Index:
                 return result.view(view_dtype)
             return result
 
-        is_one = not isinstance(keys, Iterable)
+        is_one = not _is_many_keys(keys, self._key_kind)
         if is_one:
-            keys = [keys]
-        if not isinstance(keys, np.ndarray):
-            keys = np.array(keys, dtype=Key)
+            keys = np.array([_normalize_single_key(keys, self._key_kind)], dtype=UUID_DTYPE if self._key_kind == ScalarKind.UUID else Key)
         else:
-            keys = keys.astype(Key)
+            keys = _normalize_many_keys(keys, self._key_kind)
 
         results = self._compiled.get_many(keys, dtype)
-        results = cast(results) if isinstance(results, np.ndarray) else [cast(result) for result in results]
+        results = cast(results) if isinstance(results, np.ndarray) else tuple(cast(result) for result in results)
         return results[0] if is_one else results
 
     def __getitem__(self, keys: KeyOrKeysLike) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
@@ -862,11 +990,10 @@ class Index:
         :return: Array of integers for the number of removed vectors per key
         :type: Union[int, np.ndarray]
         """
-        if not isinstance(keys, Iterable):
-            return self._compiled.remove_one(keys, compact=compact, threads=threads)
-        else:
-            keys = np.array(keys, dtype=Key)
-            return self._compiled.remove_many(keys, compact=compact, threads=threads)
+        if not _is_many_keys(keys, self._key_kind):
+            return self._compiled.remove_one(_normalize_single_key(keys, self._key_kind), compact=compact, threads=threads)
+        keys = _normalize_many_keys(keys, self._key_kind)
+        return self._compiled.remove_many(keys, compact=compact, threads=threads)
 
     def __delitem__(self, keys: KeyOrKeysLike) -> Union[int, np.ndarray]:
         return self.remove(keys)
@@ -889,17 +1016,22 @@ class Index:
         :return: Number of vectors that were found and renamed
         :rtype: int
         """
-        if isinstance(from_, Iterable):
-            from_ = np.array(from_, dtype=Key)
-            if isinstance(to, Iterable):
-                to = np.array(to, dtype=Key)
+        from_is_many = _is_many_keys(from_, self._key_kind)
+        to_is_many = _is_many_keys(to, self._key_kind)
+
+        if from_is_many:
+            from_ = _normalize_many_keys(from_, self._key_kind)
+            if to_is_many:
+                to = _normalize_many_keys(to, self._key_kind)
                 return self._compiled.rename_many_to_many(from_, to)
+            return self._compiled.rename_many_to_one(from_, _normalize_single_key(to, self._key_kind))
 
-            else:
-                return self._compiled.rename_many_to_one(from_, int(to))
-
-        else:
-            return self._compiled.rename_one_to_one(int(from_), int(to))
+        if to_is_many:
+            raise ValueError("`to` must be a single key when `from_` is a single key")
+        return self._compiled.rename_one_to_one(
+            _normalize_single_key(from_, self._key_kind),
+            _normalize_single_key(to, self._key_kind),
+        )
 
     @property
     def jit(self) -> bool:
@@ -1001,6 +1133,11 @@ class Index:
         :rtype: ScalarKind
         """
         return self._compiled.dtype
+
+    @property
+    def key_kind(self) -> ScalarKind:
+        """Returns the key kind used by this index."""
+        return self._key_kind
 
     @property
     def connectivity(self) -> int:
@@ -1118,6 +1255,12 @@ class Index:
         path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
             raise ValueError("path_or_buffer is required")
+        metadata = Index.metadata(path_or_buffer)
+        if metadata and metadata["kind_key"] != self.key_kind:
+            raise ValueError(
+                f"Key kind mismatch: serialized index uses {metadata['kind_key']}, "
+                f"but this instance expects {self.key_kind}"
+            )
         if _is_buffer(path_or_buffer):
             self._compiled.load_index_from_buffer(path_or_buffer, progress)
         else:
@@ -1147,6 +1290,12 @@ class Index:
         path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
             raise ValueError("path_or_buffer is required")
+        metadata = Index.metadata(path_or_buffer)
+        if metadata and metadata["kind_key"] != self.key_kind:
+            raise ValueError(
+                f"Key kind mismatch: serialized index uses {metadata['kind_key']}, "
+                f"but this instance expects {self.key_kind}"
+            )
         if _is_buffer(path_or_buffer):
             self._compiled.view_index_from_buffer(path_or_buffer, progress)
         else:
@@ -1176,6 +1325,7 @@ class Index:
             ndim=self.ndim,
             metric=self.metric,
             dtype=self.dtype,
+            key_kind=self.key_kind,
             connectivity=self.connectivity,
             expansion_add=self.expansion_add,
             expansion_search=self.expansion_search,
@@ -1263,9 +1413,7 @@ class Index:
         else:
             if keys is None:
                 keys = self._compiled.get_keys_in_slice()
-            if not isinstance(keys, np.ndarray):
-                keys = np.array(keys)
-            keys = keys.astype(Key)
+            keys = _normalize_many_keys(keys, self._key_kind)
             results = self._compiled.cluster_keys(
                 keys,
                 min_count=min_count,
@@ -1290,14 +1438,20 @@ class Index:
         :return: Pairwise distance(s) between the provided keys.
         :rtype: Union[np.ndarray, float]
         """
-        assert isinstance(left, Iterable) == isinstance(right, Iterable)
+        left_is_many = _is_many_keys(left, self._key_kind)
+        right_is_many = _is_many_keys(right, self._key_kind)
+        if left_is_many != right_is_many:
+            raise ValueError("`left` and `right` must both be scalar keys or both be key arrays")
 
-        if not isinstance(left, Iterable):
-            return self._compiled.pairwise_distance(int(left), int(right))
-        else:
-            left = np.array(left).astype(Key)
-            right = np.array(right).astype(Key)
-            return self._compiled.pairwise_distances(left, right)
+        if not left_is_many:
+            return self._compiled.pairwise_distance(
+                _normalize_single_key(left, self._key_kind),
+                _normalize_single_key(right, self._key_kind),
+            )
+
+        left = _normalize_many_keys(left, self._key_kind)
+        right = _normalize_many_keys(right, self._key_kind)
+        return self._compiled.pairwise_distances(left, right)
 
     @property
     def keys(self) -> IndexedKeys:
@@ -1315,7 +1469,7 @@ class Index:
         :return: Array of vectors.
         :rtype: np.ndarray
         """
-        return self.get(self.keys)
+        return np.vstack(self.get(self.keys))
 
     @property
     def max_level(self) -> int:
@@ -1411,6 +1565,7 @@ class Index:
             "hardware_acceleration": self.hardware_acceleration,
             "metric_kind": self.metric_kind,
             "dtype": self.dtype,
+            "key_kind": self.key_kind,
             "path": self.path,
             "compiled_with_openmp": USES_OPENMP,
             "compiled_with_simsimd": USES_SIMSIMD,
@@ -1426,13 +1581,14 @@ class Index:
         if not hasattr(self, "_compiled"):
             return "usearch.Index(failed)"
         f = (
-            "usearch.Index({} x {}, {}, multi: {}, connectivity: {}, "
+            "usearch.Index({} x {}, {}, key_kind: {}, multi: {}, connectivity: {}, "
             "expansion: {} & {}, {:,} vectors in {} levels, {} hardware acceleration)"
         )
         return f.format(
             self.dtype,
             self.ndim,
             self.metric_kind,
+            self.key_kind,
             self.multi,
             self.connectivity,
             self.expansion_add,
@@ -1456,6 +1612,7 @@ class Index:
                 "usearch.Index",
                 "- config",
                 f"-- data type: {self.dtype}",
+                f"-- key kind: {self.key_kind}",
                 f"-- dimensions: {self.ndim}",
                 f"-- metric: {self.metric_kind}",
                 f"-- multi: {self.multi}",
