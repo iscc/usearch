@@ -88,6 +88,26 @@ struct uuid_t {
     std::uint8_t octets[16];
 };
 
+inline bool operator==(uuid_t const& a, uuid_t const& b) noexcept {
+    return std::memcmp(a.octets, b.octets, sizeof(a.octets)) == 0;
+}
+inline bool operator!=(uuid_t const& a, uuid_t const& b) noexcept { return !(a == b); }
+inline bool operator<(uuid_t const& a, uuid_t const& b) noexcept {
+    return std::memcmp(a.octets, b.octets, sizeof(a.octets)) < 0;
+}
+
+template <> struct hash_gt<uuid_t> {
+    std::size_t operator()(uuid_t const& element) const noexcept {
+        // 64-bit FNV-1a hash over all 16 octets.
+        std::uint64_t hash = 14695981039346656037ull;
+        for (std::size_t i = 0; i != sizeof(element.octets); ++i) {
+            hash ^= element.octets[i];
+            hash *= 1099511628211ull;
+        }
+        return static_cast<std::size_t>(hash);
+    }
+};
+
 class f16_bits_t;
 class bf16_bits_t;
 

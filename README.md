@@ -49,9 +49,14 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 
 > **ISCC Foundation Fork** -- This is a maintained fork of [USearch](https://github.com/unum-cloud/usearch)
 > by the [ISCC Foundation](https://iscc.io), published on PyPI as
-> [`usearch-iscc`](https://pypi.org/project/usearch-iscc/). It includes bug fixes and patches not yet
-> available upstream. The Python import name remains `usearch` for compatibility. Install with:
-> `pip install usearch-iscc`
+> [`usearch-iscc`](https://pypi.org/project/usearch-iscc/). The Python import name remains `usearch`
+> for compatibility. Install with: `pip install usearch-iscc`
+>
+> **Fork divergence from upstream:**
+> - 128-bit key support (Python): `Index(ndim=..., key_kind="uuid")` for packed 16-byte keys
+> - Bug fix: `Index.vectors` returns `np.ndarray` instead of broken list/tuple
+> - Bug fix: `self_recall()` wraps `index.get()` result with `np.vstack()` before search
+> - Build: published as `usearch-iscc` on PyPI with independent release cycle
 
 ---
 
@@ -153,6 +158,47 @@ index = Index(
     multi=False, # Optional: Allow multiple vectors per key, default = False
 )
 ```
+
+## 128-bit Keys (UUID Mode)
+
+By default, USearch uses 64-bit unsigned integer keys. This fork adds support for 128-bit keys via `key_kind="uuid"`, allowing you to pack structured identifiers (e.g. content hashes, chunk pointers) directly into the key.
+
+```py
+import numpy as np
+from usearch.index import Index
+
+# Create an index with 128-bit keys
+index = Index(ndim=128, metric='cos', key_kind='uuid')
+
+# Keys are 16-byte values: single keys as bytes, batches as numpy V16 arrays
+batch_size = 1000
+keys = np.empty(batch_size, dtype='V16')
+vectors = np.random.randn(batch_size, 128).astype(np.float32)
+
+for i in range(batch_size):
+    body   = i.to_bytes(8, 'big')          # 8 bytes: content identity
+    offset = (i * 16).to_bytes(4, 'big')   # 4 bytes: chunk offset
+    size   = (1024 + i).to_bytes(4, 'big')  # 4 bytes: chunk size
+    keys[i] = body + offset + size          # 16 bytes total
+
+index.add(keys, vectors)
+matches = index.search(vectors[0], count=5)
+
+for match in matches:
+    print(match.key, match.distance)  # match.key is bytes(16)
+
+# Single-key operations use bytes(16)
+single_key = keys[0].tobytes()
+index.contains(single_key)  # bool
+index.get(single_key)       # np.ndarray or None
+index.remove(single_key)
+
+# Save/load preserves key kind; mismatched load raises ValueError
+index.save('index.usearch')
+restored = Index.restore('index.usearch')  # auto-detects uuid mode
+```
+
+> **Note:** Auto-generated keys are not supported in uuid mode — you must always pass explicit keys to `add()`.
 
 ## Serialization & Serving `Index` from Disk
 

@@ -23,7 +23,7 @@ uv pip install usearch-iscc
 ```toml
 [project]
 dependencies = [
-    "usearch-iscc>=2.23.3",
+    "usearch-iscc>=2.23.4",
 ]
 ```
 
@@ -62,8 +62,8 @@ The build and deployment process is fully automated:
 
 2. **Create and push a version tag:**
    ```bash
-   git tag v2.23.3
-   git push origin v2.23.3
+   git tag v2.23.4
+   git push origin v2.23.4
    ```
 
 3. **GitHub Actions automatically:**
@@ -108,15 +108,15 @@ python -c "import usearch; print(usearch.__version__)"
 If needed, you can retag to trigger a rebuild:
 
 ```bash
-git tag -d v2.23.3
-git push origin :refs/tags/v2.23.3
-git tag v2.23.3
-git push origin v2.23.3
+git tag -d v2.23.4
+git push origin :refs/tags/v2.23.4
+git tag v2.23.4
+git push origin v2.23.4
 ```
 
 ## Version Numbering
 
-This fork follows the upstream version scheme (e.g., `2.23.3`). Tags use the format `v2.23.3`.
+This fork follows the upstream version scheme (e.g., `2.23.4`). Tags use the format `v2.23.4`.
 
 ## Differences from Upstream
 
