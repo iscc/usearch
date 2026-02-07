@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 env:
   PYTHONUTF8: 1
@@ -68,6 +69,7 @@ jobs:
 
   generate_index:
     name: Generate PEP 503 Index
+    if: startsWith(github.ref, 'refs/tags/')
     needs: build_wheels
     runs-on: ubuntu-22.04
 
@@ -207,6 +209,7 @@ jobs:
 
   deploy_pages:
     name: Deploy to GitHub Pages
+    if: startsWith(github.ref, 'refs/tags/')
     needs: generate_index
     runs-on: ubuntu-22.04
     permissions:
@@ -255,6 +258,7 @@ jobs:
 
   publish_pypi:
     name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/')
     needs: build_wheels
     runs-on: ubuntu-latest
 
