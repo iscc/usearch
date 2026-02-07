@@ -49,9 +49,14 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 
 > **ISCC Foundation Fork** -- This is a maintained fork of [USearch](https://github.com/unum-cloud/usearch)
 > by the [ISCC Foundation](https://iscc.io), published on PyPI as
-> [`usearch-iscc`](https://pypi.org/project/usearch-iscc/). It includes bug fixes and patches not yet
-> available upstream. The Python import name remains `usearch` for compatibility. Install with:
-> `pip install usearch-iscc`
+> [`usearch-iscc`](https://pypi.org/project/usearch-iscc/). The Python import name remains `usearch`
+> for compatibility. Install with: `pip install usearch-iscc`
+>
+> **Fork divergence from upstream:**
+> - 128-bit key support (Python): `Index(ndim=..., key_kind="uuid")` for packed 16-byte keys
+> - Bug fix: `Index.vectors` returns `np.ndarray` instead of broken list/tuple
+> - Bug fix: `self_recall()` wraps `index.get()` result with `np.vstack()` before search
+> - Build: published as `usearch-iscc` on PyPI with independent release cycle
 
 ---
 
