@@ -950,7 +950,7 @@ class Index:
             keys = _normalize_many_keys(keys, self._key_kind)
 
         results = self._compiled.get_many(keys, dtype)
-        results = cast(results) if isinstance(results, np.ndarray) else tuple(cast(result) for result in results)
+        results = cast(results) if isinstance(results, np.ndarray) else [cast(result) for result in results]
         return results[0] if is_one else results
 
     def __getitem__(self, keys: KeyOrKeysLike) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
@@ -1469,7 +1469,7 @@ class Index:
         :return: Array of vectors.
         :rtype: np.ndarray
         """
-        return np.vstack(self.get(self.keys))
+        return self.get(self.keys)
 
     @property
     def max_level(self) -> int:

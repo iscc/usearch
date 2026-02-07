@@ -54,8 +54,6 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 >
 > **Fork divergence from upstream:**
 > - 128-bit key support (Python): `Index(ndim=..., key_kind="uuid")` for packed 16-byte keys
-> - Bug fix: `Index.vectors` returns `np.ndarray` instead of broken list/tuple
-> - Bug fix: `self_recall()` wraps `index.get()` result with `np.vstack()` before search
 > - Build: published as `usearch-iscc` on PyPI with independent release cycle
 
 ---
