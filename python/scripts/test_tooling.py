@@ -154,6 +154,135 @@ def test_multi_index():
     assert len(matches[0].keys) == 2
 
 
+def test_multi_index_uuid():
+    """Indexes with UUID (128-bit) keyed shards."""
+    ndim = 10
+    index_a = Index(ndim=ndim, key_kind="uuid")
+    index_b = Index(ndim=ndim, key_kind="uuid")
+
+    vectors = random_vectors(count=3, ndim=ndim)
+    key_a = b"\x00" * 15 + b"\x01"
+    key_b = b"\x00" * 15 + b"\x02"
+    index_a.add(key_a, vectors[0])
+    index_b.add(key_b, vectors[1])
+
+    indexes = Indexes([index_a, index_b])
+    assert len(indexes) == 2
+
+    matches = indexes.search(vectors[2], 10)
+    assert len(matches) == 2
+
+    matches = indexes.search(vectors[2], 1)
+    assert len(matches) == 1
+
+    matches = indexes.search(vectors, 10)
+    assert len(matches) == 3
+    assert len(matches[0].keys) == 2
+
+
+def test_multi_index_uuid_paths(tmp_path):
+    """Indexes with UUID shards loaded from file paths."""
+    ndim = 10
+    index_a = Index(ndim=ndim, key_kind="uuid")
+    index_b = Index(ndim=ndim, key_kind="uuid")
+
+    vectors = random_vectors(count=3, ndim=ndim)
+    index_a.add(b"\x00" * 15 + b"\x01", vectors[0])
+    index_b.add(b"\x00" * 15 + b"\x02", vectors[1])
+
+    path_a = str(tmp_path / "a.usearch")
+    path_b = str(tmp_path / "b.usearch")
+    index_a.save(path_a)
+    index_b.save(path_b)
+
+    # Path-only init with auto key-kind detection
+    # Use threads=1 to avoid pre-existing multi-threaded merge_paths crash on Windows
+    indexes = Indexes(paths=[path_a, path_b], view=True, threads=1)
+    assert len(indexes) == 2
+    matches = indexes.search(vectors[2], 10)
+    assert len(matches) == 2
+
+    # merge_path method
+    indexes2 = Indexes(key_kind="uuid")
+    indexes2.merge_path(path_a)
+    assert len(indexes2) == 1
+
+
+def test_multi_index_merge_path(tmp_path):
+    """merge_path works for u64 indexes."""
+    ndim = 10
+    index = Index(ndim=ndim)
+    vectors = random_vectors(count=1, ndim=ndim)
+    index.add(42, vectors[0])
+
+    path = str(tmp_path / "shard.usearch")
+    index.save(path)
+
+    indexes = Indexes()
+    indexes.merge_path(path)
+    assert len(indexes) == 1
+
+    matches = indexes.search(vectors[0], 1)
+    assert len(matches) == 1
+
+
+def test_multi_index_mixed_key_kinds_rejected():
+    """Merging indexes with different key kinds raises TypeError."""
+    ndim = 10
+    index_u64 = Index(ndim=ndim, key_kind="u64")
+    index_uuid = Index(ndim=ndim, key_kind="uuid")
+
+    indexes = Indexes([index_u64])
+    with pytest.raises(TypeError, match="key_kind"):
+        indexes.merge(index_uuid)
+
+
+def test_multi_index_empty():
+    """Empty Indexes behaves correctly."""
+    indexes = Indexes()
+    assert len(indexes) == 0
+
+
+def test_multi_index_auto_detect_from_merge():
+    """Bare Indexes() auto-detects key kind from first merge() call."""
+    ndim = 10
+    index_uuid = Index(ndim=ndim, key_kind="uuid")
+    index_uuid.add(b"\x00" * 15 + b"\x01", np.random.rand(ndim).astype(np.float32))
+
+    indexes = Indexes()
+    indexes.merge(index_uuid)
+    assert len(indexes) == 1
+
+
+def test_multi_index_path_key_kind_mismatch(tmp_path):
+    """Loading a mismatched-key-kind path raises TypeError, not a crash."""
+    ndim = 10
+    index_uuid = Index(ndim=ndim, key_kind="uuid")
+    index_uuid.add(b"\x00" * 15 + b"\x01", np.random.rand(ndim).astype(np.float32))
+    uuid_path = str(tmp_path / "uuid_shard.usearch")
+    index_uuid.save(uuid_path)
+
+    index_u64 = Index(ndim=ndim, key_kind="u64")
+    index_u64.add(42, np.random.rand(ndim).astype(np.float32))
+    u64_path = str(tmp_path / "u64_shard.usearch")
+    index_u64.save(u64_path)
+
+    # merge_path with explicit key_kind mismatch
+    indexes = Indexes(key_kind="u64")
+    with pytest.raises(TypeError, match="key_kind"):
+        indexes.merge_path(uuid_path)
+
+    # Mixed paths in constructor
+    with pytest.raises(TypeError, match="key_kind"):
+        Indexes(paths=[uuid_path, u64_path], threads=1)
+
+
+def test_multi_index_empty_generator_paths():
+    """Empty generator as paths does not crash."""
+    indexes = Indexes(paths=iter([]))
+    assert len(indexes) == 0
+
+
 def test_kmeans(count_vectors: int = 100, ndim: int = 10, count_clusters: int = 5):
     X = np.random.rand(count_vectors, ndim)
     assignments, distances, centroids = kmeans(X, count_clusters)

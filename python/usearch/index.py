@@ -30,6 +30,7 @@ from usearch.compiled import (
     Index as _CompiledIndex,
     IndexBig as _CompiledIndexBig,
     Indexes as _CompiledIndexes,
+    IndexesBig as _CompiledIndexesBig,
     IndexStats as _CompiledIndexStats,
     index_dense_metadata_from_path as _index_dense_metadata_from_path,
     index_dense_metadata_from_buffer as _index_dense_metadata_from_buffer,
@@ -1639,25 +1640,103 @@ class Index:
 
 
 class Indexes:
+    """Multi-index container for searching across multiple shards.
+
+    Supports both u64 and uuid key kinds. The backend is chosen lazily:
+    auto-detected from the first merged shard or path, or set explicitly
+    via the `key_kind` parameter. A bare `Indexes()` defers the choice
+    until the first `merge()` or `merge_path()` call; if `search()` is
+    called before any shard is added, it defaults to u64.
+    """
+
     def __init__(
         self,
-        indexes: Iterable[Index] = [],
-        paths: Iterable[os.PathLike] = [],
+        indexes: Optional[Iterable[Index]] = None,
+        paths: Optional[Iterable[os.PathLike]] = None,
         view: bool = False,
         threads: int = 0,
+        key_kind: Union[str, ScalarKind, None] = None,
     ) -> None:
-        self._compiled = _CompiledIndexes()
-        for index in indexes:
-            self._compiled.merge(index._compiled)
-        self._compiled.merge_paths(paths, view=view, threads=threads)
+        if key_kind is not None:
+            self._key_kind = _normalize_key_kind(key_kind)
+            self._compiled = self._make_compiled(self._key_kind)
+        else:
+            self._key_kind = None
+            self._compiled = None
+
+        if indexes:
+            for index in indexes:
+                self.merge(index)
+
+        if paths is not None:
+            paths = list(paths)
+            if paths:
+                if self._compiled is None:
+                    self._key_kind = self._detect_key_kind_from_path(paths[0])
+                    self._compiled = self._make_compiled(self._key_kind)
+                self._validate_paths_key_kind(paths)
+                self._compiled.merge_paths(
+                    [os.fspath(p) for p in paths], view=view, threads=threads
+                )
+
+    @staticmethod
+    def _make_compiled(key_kind: ScalarKind):
+        """Create the appropriate compiled multi-index backend."""
+        if key_kind == ScalarKind.UUID:
+            return _CompiledIndexesBig()
+        return _CompiledIndexes()
+
+    @staticmethod
+    def _detect_key_kind_from_path(path: os.PathLike) -> ScalarKind:
+        """Detect key kind from index file metadata."""
+        meta = _index_dense_metadata_from_path(os.fspath(path))
+        return meta["kind_key"]
+
+    def _validate_paths_key_kind(self, paths) -> None:
+        """Validate that all paths match the expected key kind."""
+        for path in paths:
+            path_kind = self._detect_key_kind_from_path(path)
+            if path_kind != self._key_kind:
+                raise TypeError(
+                    f"Path {path!r} has key_kind={path_kind!r}, "
+                    f"expected key_kind={self._key_kind!r}."
+                )
 
     def merge(self, index: Index):
+        """Merge an in-memory index shard."""
+        if self._compiled is None:
+            self._key_kind = index._key_kind
+            self._compiled = self._make_compiled(self._key_kind)
+        elif self._key_kind != index._key_kind:
+            raise TypeError(
+                f"Cannot merge index with key_kind={index._key_kind!r} "
+                f"into Indexes with key_kind={self._key_kind!r}."
+            )
         self._compiled.merge(index._compiled)
 
     def merge_path(self, path: os.PathLike):
-        self._compiled.merge_path(os.fspath(path))
+        """Merge an index shard from a file path."""
+        path_kind = self._detect_key_kind_from_path(path)
+        if self._compiled is None:
+            self._key_kind = path_kind
+            self._compiled = self._make_compiled(self._key_kind)
+        elif self._key_kind != path_kind:
+            raise TypeError(
+                f"Path {path!r} has key_kind={path_kind!r}, "
+                f"expected key_kind={self._key_kind!r}."
+            )
+        self._compiled.merge_paths([os.fspath(path)])
+
+    def _ensure_compiled(self):
+        """Lazily create a u64 backend if no key kind was determined yet."""
+        if self._compiled is None:
+            self._key_kind = ScalarKind.U64
+            self._compiled = self._make_compiled(self._key_kind)
+        return self._compiled
 
     def __len__(self) -> int:
+        if self._compiled is None:
+            return 0
         return self._compiled.__len__()
 
     def search(
@@ -1670,11 +1749,9 @@ class Indexes:
         progress: Optional[ProgressCallback] = None,
     ):
         return _search_in_compiled(
-            self._compiled.search_many,
+            self._ensure_compiled().search_many,
             vectors,
-            # Batch scheduling:
             log=False,
-            # Search constraints:
             count=count,
             exact=exact,
             threads=threads,

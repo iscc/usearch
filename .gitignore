@@ -29,6 +29,7 @@ perf.data
 # Python wrappers
 __pycache__
 *.egg-info
+*.pyd
 dist/
 wheelhouse/
 

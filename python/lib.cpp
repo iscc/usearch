@@ -69,10 +69,13 @@ template <typename native_at> struct dense_index_py_gt : public native_at {
 using dense_index_py_t = dense_index_py_gt<index_dense_t>;
 using dense_index_big_py_t = dense_index_py_gt<index_dense_big_t>;
 
-struct dense_indexes_py_t {
-    std::vector<std::shared_ptr<dense_index_py_t>> shards_;
+template <typename index_py_t>
+struct dense_indexes_py_gt {
+    using native_t = typename index_py_t::native_t;
+    using index_t = index_py_t;
+    std::vector<std::shared_ptr<index_py_t>> shards_;
 
-    void merge(std::shared_ptr<dense_index_py_t> shard) { shards_.push_back(shard); }
+    void merge(std::shared_ptr<index_py_t> shard) { shards_.push_back(shard); }
     std::size_t bytes_per_vector() const noexcept { return shards_.empty() ? 0 : shards_[0]->bytes_per_vector(); }
     std::size_t scalar_words() const noexcept { return shards_.empty() ? 0 : shards_[0]->scalar_words(); }
     index_limits_t limits() const noexcept { return {size(), std::numeric_limits<std::size_t>::max()}; }
@@ -83,15 +86,18 @@ struct dense_indexes_py_t {
 
         shards_.reserve(shards_.size() + paths.size());
         std::mutex shards_mutex;
-        executor_default_t{threads}.dynamic(paths.size(), [&](std::size_t, std::size_t task_idx) {
-            index_dense_t index = index_dense_t::make(paths[task_idx].c_str(), view);
+        executor_default_t{threads}.dynamic(paths.size(), [&](std::size_t thread_idx, std::size_t task_idx) {
+            native_t index = native_t::make(paths[task_idx].c_str(), view);
             if (!index)
                 return false;
-            auto shared_index = std::make_shared<dense_index_py_t>(std::move(index));
+            auto shared_index = std::make_shared<index_py_t>(std::move(index));
             std::unique_lock<std::mutex> lock(shards_mutex);
             shards_.push_back(shared_index);
-            if (PyErr_CheckSignals() != 0)
-                throw py::error_already_set();
+            // Only check signals from the main thread (thread 0) to avoid
+            // crashes on Windows where PyErr_CheckSignals requires the GIL.
+            if (thread_idx == 0)
+                if (PyErr_CheckSignals() != 0)
+                    throw py::error_already_set();
             return true;
         });
     }
@@ -104,12 +110,16 @@ struct dense_indexes_py_t {
     }
 };
 
+using dense_indexes_py_t = dense_indexes_py_gt<dense_index_py_t>;
+using dense_indexes_big_py_t = dense_indexes_py_gt<dense_index_big_py_t>;
+
 template <typename index_at> struct index_key_gt {
     using key_t = typename index_at::vector_key_t;
 };
 
-template <> struct index_key_gt<dense_indexes_py_t> {
-    using key_t = dense_key_t;
+template <typename index_py_t>
+struct index_key_gt<dense_indexes_py_gt<index_py_t>> {
+    using key_t = typename index_key_gt<index_py_t>::key_t;
 };
 
 template <typename key_at> struct key_codec_gt;
@@ -398,16 +408,20 @@ static void search_typed(                                   //
     }
 }
 
-template <typename scalar_at>
-static void search_typed(                                       //
-    dense_indexes_py_t& indexes, py::buffer_info& vectors_info, //
-    std::size_t wanted, bool exact, std::size_t threads,        //
+template <typename scalar_at, typename indexes_at>
+static void search_typed_multi(                              //
+    indexes_at& indexes, py::buffer_info& vectors_info,      //
+    std::size_t wanted, bool exact, std::size_t threads,     //
     py::array& keys_py, py::array_t<distance_t>& distances_py, py::array_t<Py_ssize_t>& counts_py,
     std::atomic<std::size_t>& stats_visited_members, std::atomic<std::size_t>& stats_computed_distances,
     progress_func_t const& progress) {
 
+    using key_t = typename index_key_gt<indexes_at>::key_t;
+    using index_py_t = typename indexes_at::index_t;
+    using search_result_t = typename index_py_t::search_result_t;
+
     py::buffer_info keys_info = keys_py.request();
-    dense_key_t* keys_data = key_data<dense_key_t>(keys_info);
+    key_t* keys_data = key_data<key_t>(keys_info);
     auto distances_py2d = distances_py.template mutable_unchecked<2>();
     auto counts_py1d = counts_py.template mutable_unchecked<1>();
 
@@ -429,7 +443,7 @@ static void search_typed(                                       //
 
     atomic_error_t atomic_error{nullptr};
     executor_default_t{threads}.dynamic(indexes.shards_.size(), [&](std::size_t thread_idx, std::size_t task_idx) {
-        dense_index_py_t& index = *indexes.shards_[task_idx].get();
+        index_py_t& index = *indexes.shards_[task_idx].get();
 
         index_limits_t limits;
         limits.members = index.size();
@@ -442,7 +456,7 @@ static void search_typed(                                       //
 
         for (std::size_t vector_idx = 0; vector_idx != static_cast<std::size_t>(vectors_count); ++vector_idx) {
             scalar_at const* vector = (scalar_at const*)(vectors_data + vector_idx * vectors_info.strides[0]);
-            dense_search_result_t result = index.search(vector, wanted, 0, exact);
+            search_result_t result = index.search(vector, wanted, 0, exact);
             if (!result) {
                 atomic_error = result.error.release();
                 return false;
@@ -450,8 +464,8 @@ static void search_typed(                                       //
 
             {
                 auto lock = query_mutexes.lock(vector_idx);
-                dense_key_t* query_keys =
-                    reinterpret_cast<dense_key_t*>(reinterpret_cast<byte_t*>(keys_data) + vector_idx * keys_info.strides[0]);
+                key_t* query_keys =
+                    reinterpret_cast<key_t*>(reinterpret_cast<byte_t*>(keys_data) + vector_idx * keys_info.strides[0]);
                 counts_py1d(vector_idx) = static_cast<Py_ssize_t>(result.merge_into( //
                     query_keys,                                                      //
                     &distances_py2d(vector_idx, 0),                                  //
@@ -464,17 +478,20 @@ static void search_typed(                                       //
 
             // We don't want to check for signals from multiple threads
             ++processed;
-            if (thread_idx == 0)
-                if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), indexes.shards_.size())) {
+            if (thread_idx == 0) {
+                std::size_t total = static_cast<std::size_t>(vectors_count) * indexes.shards_.size();
+                if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), total)) {
                     atomic_error.store("Operation has been terminated");
                     return false;
                 }
+            }
         }
         return true;
     });
 
     // At the end report the latest numbers, because the reporter thread may be finished earlier
-    progress_(processed.load(), indexes.shards_.size());
+    std::size_t total = static_cast<std::size_t>(vectors_count) * indexes.shards_.size();
+    progress_(processed.load(), total);
 
     // Raise the error from a single thread
     auto error = atomic_error.load();
@@ -532,6 +549,67 @@ static py::tuple search_many_in_index( //
     case scalar_kind_t::f16_k: search_typed<f16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::f32_k: search_typed<f32_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::f64_k: search_typed<f64_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + vectors_info.format);
+    }
+    // clang-format on
+
+    py::tuple results(5);
+    results[0] = keys_py;
+    results[1] = distances_py;
+    results[2] = counts_py;
+    results[3] = stats_visited_members.load();
+    results[4] = stats_computed_distances.load();
+    return results;
+}
+
+/**
+ *  @param vectors Matrix of vectors to search for.
+ *  @param wanted Number of matches per request.
+ *
+ *  @return Tuple with:
+ *      1. matrix of neighbors,
+ *      2. matrix of distances,
+ *      3. array with match counts,
+ *      4. number of visited nodes,
+ *      4. number of computed pairwise distances.
+ */
+template <typename indexes_at>
+static py::tuple search_many_in_indexes( //
+    indexes_at& indexes, py::buffer vectors, std::size_t wanted, bool exact, std::size_t threads,
+    progress_func_t const& progress) {
+
+    using key_t = typename index_key_gt<indexes_at>::key_t;
+
+    if (wanted == 0)
+        throw std::invalid_argument("`count` must be >= 1");
+
+    // Clamp threads to hardware limit instead of throwing
+    threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
+
+    py::buffer_info vectors_info = vectors.request();
+    if (vectors_info.ndim != 2)
+        throw std::invalid_argument("Expects a matrix of vectors to add!");
+
+    Py_ssize_t vectors_count = vectors_info.shape[0];
+    Py_ssize_t vectors_dimensions = vectors_info.shape[1];
+    if (vectors_dimensions != static_cast<Py_ssize_t>(indexes.scalar_words()))
+        throw std::invalid_argument("The number of vector dimensions doesn't match!");
+    if (vectors_info.strides[1] != static_cast<Py_ssize_t>(vectors_info.itemsize))
+        throw std::invalid_argument("Matrix rows must be contiguous, try `ascontiguousarray`.");
+
+    py::array keys_py = make_keys_array<key_t>(py_shape_t {vectors_count, static_cast<Py_ssize_t>(wanted)});
+    py::array_t<distance_t> distances_py({vectors_count, static_cast<Py_ssize_t>(wanted)});
+    py::array_t<Py_ssize_t> counts_py(vectors_count);
+    std::atomic<std::size_t> stats_visited_members(0);
+    std::atomic<std::size_t> stats_computed_distances(0);
+
+    // clang-format off
+    switch (numpy_string_to_kind(vectors_info.format)) {
+    case scalar_kind_t::b1x8_k: search_typed_multi<b1x8_t>(indexes, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::i8_k: search_typed_multi<i8_t>(indexes, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::f16_k: search_typed_multi<f16_t>(indexes, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::f32_k: search_typed_multi<f32_t>(indexes, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::f64_k: search_typed_multi<f64_t>(indexes, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + vectors_info.format);
     }
     // clang-format on
@@ -1540,12 +1618,27 @@ PYBIND11_MODULE(compiled, m) {
     is.def("merge", &dense_indexes_py_t::merge);
     is.def("merge_paths", &dense_indexes_py_t::merge_paths, py::arg("paths"), py::arg("view") = true,
            py::arg("threads") = 0);
-    is.def(                                                       //
-        "search_many", &search_many_in_index<dense_indexes_py_t>, //
-        py::arg("query"),                                         //
-        py::arg("count") = 10,                                    //
-        py::arg("exact") = false,                                 //
-        py::arg("threads") = 0,                                   //
-        py::arg("progress") = nullptr                             //
+    is.def(                                                            //
+        "search_many", &search_many_in_indexes<dense_indexes_py_t>,    //
+        py::arg("query"),                                              //
+        py::arg("count") = 10,                                         //
+        py::arg("exact") = false,                                      //
+        py::arg("threads") = 0,                                        //
+        py::arg("progress") = nullptr                                  //
+    );
+
+    auto isb = py::class_<dense_indexes_big_py_t>(m, "IndexesBig");
+    isb.def(py::init());
+    isb.def("__len__", &dense_indexes_big_py_t::size);
+    isb.def("merge", &dense_indexes_big_py_t::merge);
+    isb.def("merge_paths", &dense_indexes_big_py_t::merge_paths, py::arg("paths"), py::arg("view") = true,
+            py::arg("threads") = 0);
+    isb.def(                                                                //
+        "search_many", &search_many_in_indexes<dense_indexes_big_py_t>,     //
+        py::arg("query"),                                                   //
+        py::arg("count") = 10,                                              //
+        py::arg("exact") = false,                                           //
+        py::arg("threads") = 0,                                             //
+        py::arg("progress") = nullptr                                       //
     );
 }
