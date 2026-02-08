@@ -54,6 +54,7 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 >
 > **Fork divergence from upstream:**
 > - 128-bit key support (Python): `Index(ndim=..., key_kind="uuid")` for packed 16-byte keys
+> - Multi-index UUID support (Python): `Indexes` works with both u64 and uuid-keyed shards
 > - Build: published as `usearch-iscc` on PyPI with independent release cycle
 
 ---
@@ -336,12 +337,30 @@ Instead of constructing one extensive index, you can build multiple smaller ones
 from usearch.index import Indexes
 
 multi_index = Indexes(
-    indexes: Iterable[usearch.index.Index] = [...],
-    paths: Iterable[os.PathLike] = [...],
-    view: bool = False,
-    threads: int = 0,
+    indexes=[index_a, index_b],  # Merge in-memory shards
+    paths=["shard_a.usearch", "shard_b.usearch"],  # Or load from disk
+    view=False,
+    threads=0,
 )
-multi_index.search(...)
+multi_index.search(query_vectors, 10)
+```
+
+`Indexes` supports both u64 and uuid key kinds. The key kind is auto-detected from the first merged shard or path, or can be set explicitly:
+
+```py
+# Auto-detect from shards
+indexes = Indexes([uuid_index_a, uuid_index_b])
+
+# Auto-detect from paths
+indexes = Indexes(paths=["uuid_shard.usearch"])
+
+# Explicit key kind
+indexes = Indexes(key_kind="uuid")
+indexes.merge(uuid_index)
+
+# Incremental loading
+indexes = Indexes()
+indexes.merge_path("shard.usearch")
 ```
 
 ## Clustering
