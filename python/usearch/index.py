@@ -246,9 +246,7 @@ def _normalize_uuid_single_key(key) -> bytes:
 def _normalize_many_keys(keys, key_kind: ScalarKind) -> np.ndarray:
     if key_kind == ScalarKind.UUID:
         if not isinstance(keys, np.ndarray):
-            raise TypeError(
-                "Batch 128-bit keys must be a contiguous NumPy array with 16-byte itemsize (for example `dtype='V16'`)"
-            )
+            keys = np.asarray(keys)
         if keys.ndim != 1:
             raise ValueError("Keys must be a one-dimensional array")
         if keys.dtype.itemsize != 16:
@@ -369,11 +367,7 @@ def _add_to_compiled(
             keys = [keys]
 
         if key_kind == ScalarKind.UUID:
-            if not isinstance(keys, np.ndarray):
-                if count_vectors != 1:
-                    raise TypeError(
-                        "Batch 128-bit keys must be provided as a contiguous NumPy array with 16-byte itemsize"
-                    )
+            if not _is_many_keys(keys, key_kind):
                 keys = np.array([_normalize_uuid_single_key(keys[0])], dtype=UUID_DTYPE)
             keys = _normalize_many_keys(keys, key_kind)
         else:
