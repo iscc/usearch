@@ -56,6 +56,7 @@ MetricKindBitwise = (
     MetricKind.Hamming,
     MetricKind.Tanimoto,
     MetricKind.Sorensen,
+    MetricKind.NPHD,
 )
 
 
@@ -188,6 +189,7 @@ def _normalize_metric(metric) -> MetricKind:
             "hamming": MetricKind.Hamming,
             "tanimoto": MetricKind.Tanimoto,
             "sorensen": MetricKind.Sorensen,
+            "nphd": MetricKind.NPHD,
         }
         return _normalize[metric.lower()]
 

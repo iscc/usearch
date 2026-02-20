@@ -1527,6 +1527,7 @@ PYBIND11_MODULE(compiled, m) {
         .value("Hamming", metric_kind_t::hamming_k)
         .value("Tanimoto", metric_kind_t::tanimoto_k)
         .value("Sorensen", metric_kind_t::sorensen_k)
+        .value("NPHD", metric_kind_t::nphd_k)
 
         .value("Cosine", metric_kind_t::cos_k)
         .value("InnerProduct", metric_kind_t::ip_k);

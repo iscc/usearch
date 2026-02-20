@@ -35,6 +35,7 @@ metric_kind_t metric_kind_to_cpp(usearch_metric_kind_t kind) {
     case usearch_metric_hamming_k: return metric_kind_t::hamming_k;
     case usearch_metric_tanimoto_k: return metric_kind_t::tanimoto_k;
     case usearch_metric_sorensen_k: return metric_kind_t::sorensen_k;
+    case usearch_metric_nphd_k: return metric_kind_t::nphd_k;
     default: return metric_kind_t::unknown_k;
     }
 }
@@ -51,6 +52,7 @@ usearch_metric_kind_t metric_kind_to_c(metric_kind_t kind) {
     case metric_kind_t::hamming_k: return usearch_metric_hamming_k;
     case metric_kind_t::tanimoto_k: return usearch_metric_tanimoto_k;
     case metric_kind_t::sorensen_k: return usearch_metric_sorensen_k;
+    case metric_kind_t::nphd_k: return usearch_metric_nphd_k;
     default: return usearch_metric_unknown_k;
     }
 }

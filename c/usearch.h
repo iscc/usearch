@@ -49,6 +49,7 @@ USEARCH_EXPORT typedef enum usearch_metric_kind_t {
     usearch_metric_hamming_k = 8,
     usearch_metric_tanimoto_k = 9,
     usearch_metric_sorensen_k = 10,
+    usearch_metric_nphd_k = 11,
 } usearch_metric_kind_t;
 
 USEARCH_EXPORT typedef enum usearch_scalar_kind_t {

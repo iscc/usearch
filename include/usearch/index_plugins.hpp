@@ -146,6 +146,7 @@ enum class metric_kind_t : std::uint8_t {
     hamming_k = 'b',
     tanimoto_k = 't',
     sorensen_k = 's',
+    nphd_k = 'n', // Normalized Prefix Hamming Distance
 
     // Sparse Sets:
     jaccard_k = 'j',
@@ -343,6 +344,7 @@ inline char const* metric_kind_name(metric_kind_t metric) noexcept {
     case metric_kind_t::hamming_k: return "hamming";
     case metric_kind_t::tanimoto_k: return "tanimoto";
     case metric_kind_t::sorensen_k: return "sorensen";
+    case metric_kind_t::nphd_k: return "nphd";
     default: return "";
     }
 }
@@ -399,9 +401,11 @@ inline expected_gt<metric_kind_t> metric_from_name(char const* name, std::size_t
         parsed.result = metric_kind_t::tanimoto_k;
     } else if (str_equals(name, len, "sorensen")) {
         parsed.result = metric_kind_t::sorensen_k;
+    } else if (str_equals(name, len, "nphd")) {
+        parsed.result = metric_kind_t::nphd_k;
     } else
         parsed.failed("Unknown distance, choose: l2sq, ip, cos, haversine, divergence, jaccard, pearson, hamming, "
-                      "tanimoto, sorensen");
+                      "tanimoto, sorensen, nphd");
     return parsed;
 }
 
@@ -979,7 +983,11 @@ template <std::size_t alignment_ak = 1> class memory_mapping_allocator_gt {
         if (!last_arena_ || (last_usage_ + extended_bytes >= last_capacity_)) {
             std::size_t new_cap = (std::max)(last_capacity_, ceil2(extended_bytes)) * capacity_multiplier();
             byte_t* new_arena = page_allocator_t{}.allocate(new_cap);
-            if (!new_arena || new_arena == (byte_t*)MAP_FAILED)
+            if (!new_arena
+#if !defined(USEARCH_DEFINED_WINDOWS)
+                || new_arena == (byte_t*)MAP_FAILED
+#endif
+            )
                 return nullptr;
             std::memcpy(new_arena, &last_arena_, sizeof(byte_t*));
             std::memcpy(new_arena + sizeof(byte_t*), &new_cap, sizeof(std::size_t));
@@ -1494,6 +1502,57 @@ template <typename scalar_at = std::uint64_t, typename result_at = float> struct
             any_count += std::bitset<bits_per_word_k>(a[i]).count() + std::bitset<bits_per_word_k>(b[i]).count();
         }
         return 1 - 2 * result_t(and_count) / any_count;
+    }
+};
+
+/**
+ *  @brief  Normalized Prefix Hamming Distance for length-prefixed binary vectors.
+ *
+ *  Expects vectors where the first byte stores the data length in bytes.
+ *  Computes Hamming distance over the common prefix and normalizes by
+ *  the shorter vector's bit count. Returns a float in [0.0, 1.0].
+ */
+template <typename scalar_at = b1x8_t, typename result_at = float> struct metric_nphd_gt {
+    using scalar_t = scalar_at;
+    using result_t = result_at;
+    static_assert( //
+        std::is_unsigned<scalar_t>::value ||
+            (std::is_enum<scalar_t>::value && std::is_unsigned<typename std::underlying_type<scalar_t>::type>::value),
+        "NPHD requires unsigned integral words");
+    static_assert(std::is_floating_point<result_t>::value, "NPHD returns a normalized fraction");
+
+    inline result_t operator()(scalar_t const* a, scalar_t const* b, std::size_t words) const noexcept {
+        if (words == 0) return result_t(0);
+
+        auto const* a_bytes = reinterpret_cast<std::uint8_t const*>(a);
+        auto const* b_bytes = reinterpret_cast<std::uint8_t const*>(b);
+        std::size_t a_len = a_bytes[0];
+        std::size_t b_len = b_bytes[0];
+        std::size_t min_len = a_len < b_len ? a_len : b_len;
+
+        // Clamp to allocation bounds (defensive against corrupt length bytes)
+        std::size_t max_data = words - 1;
+        if (min_len > max_data) min_len = max_data;
+
+        std::size_t min_bits = min_len * 8;
+        if (min_bits == 0) return result_t(0);
+
+        // Hamming distance over common prefix
+        std::size_t hamming = 0;
+        auto const* a_data = a_bytes + 1;
+        auto const* b_data = b_bytes + 1;
+
+#if USEARCH_USE_OPENMP
+#pragma omp simd reduction(+ : hamming)
+#elif defined(USEARCH_DEFINED_CLANG)
+#pragma clang loop vectorize(enable)
+#elif defined(USEARCH_DEFINED_GCC)
+#pragma GCC ivdep
+#endif
+        for (std::size_t i = 0; i < min_len; ++i)
+            hamming += std::bitset<8>(a_data[i] ^ b_data[i]).count();
+
+        return static_cast<result_t>(hamming) / static_cast<result_t>(min_bits);
     }
 };
 
@@ -2024,6 +2083,7 @@ class metric_punned_t {
         case metric_kind_t::tanimoto_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_tanimoto_gt<b1x8_t>>; break;
         case metric_kind_t::hamming_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_hamming_gt<b1x8_t>>; break;
         case metric_kind_t::sorensen_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_sorensen_gt<b1x8_t>>; break;
+        case metric_kind_t::nphd_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_nphd_gt<b1x8_t>>; break;
         default: return;
         }
     }

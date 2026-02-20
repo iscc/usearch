@@ -55,6 +55,7 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 > **Fork divergence from upstream:**
 > - 128-bit key support (Python): `Index(ndim=..., key_kind="uuid")` for packed 16-byte keys
 > - Multi-index UUID support (Python): `Indexes` works with both u64 and uuid-keyed shards
+> - NPHD metric (all bindings): Normalized Prefix Hamming Distance for length-prefixed binary vectors
 > - Build: published as `usearch-iscc` on PyPI with independent release cycle
 
 ---
@@ -67,6 +68,7 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 - ✅ [View large indexes from disk](#serialization--serving-index-from-disk) without loading into RAM.
 - ✅ Heterogeneous lookups, renaming/relabeling, and on-the-fly deletions.
 - ✅ Binary Tanimoto and Sorensen coefficients for [Genomics and Chemistry applications](#usearch--rdkit--molecular-search).
+- ✅ [NPHD metric](#nphd-metric-normalized-prefix-hamming-distance) for variable-length binary fingerprint comparison.
 - ✅ Space-efficient point-clouds with `uint40_t`, accommodating 4B+ size.
 - ✅ Compatible with OpenMP and custom "executors" for fine-grained parallelism.
 - ✅ [Semantic Search](#usearch--uform--ucall--multimodal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
@@ -198,6 +200,51 @@ restored = Index.restore('index.usearch')  # auto-detects uuid mode
 ```
 
 > **Note:** Auto-generated keys are not supported in uuid mode — you must always pass explicit keys to `add()`.
+
+## NPHD Metric (Normalized Prefix Hamming Distance)
+
+NPHD is a built-in distance metric for comparing length-prefixed binary vectors. Each vector's first byte stores the data length in bytes. The metric computes the Hamming distance over the common prefix of two vectors and normalizes by the shorter vector's bit count, returning a value in `[0.0, 1.0]`.
+
+This is useful for content identification systems like [ISCC](https://iscc.codes) where binary fingerprints may have variable-length prefixes. Previously this required a custom Numba `@cfunc` metric (~500MB of dependencies) and `change_metric()` hacks after every `load()`/`view()`. The native metric eliminates both.
+
+```py
+import numpy as np
+from usearch.index import Index, MetricKind, ScalarKind
+
+# Vector layout: [length_byte, data_byte_0, data_byte_1, ..., padding...]
+# ndim is total size in bits, including the length byte.
+ndim = 264  # 33 bytes = 1 length byte + up to 32 data bytes
+
+index = Index(ndim=ndim, metric=MetricKind.NPHD, dtype=ScalarKind.B1)
+
+def make_vector(length, data_bytes):
+    """Build a length-prefixed binary vector."""
+    vec = np.zeros(ndim // 8, dtype=np.uint8)
+    vec[0] = length
+    vec[1:1 + len(data_bytes)] = data_bytes
+    return vec
+
+a = make_vector(4, [0xAA, 0xBB, 0xCC, 0xDD])
+b = make_vector(4, [0xAA, 0xBB, 0xCC, 0x00])
+
+index.add(0, a)
+index.add(1, b)
+
+matches = index.search(a, 2)
+print(matches[0].key, matches[0].distance)  # 0, 0.0
+print(matches[1].key, matches[1].distance)  # 1, ~0.15625
+
+# Save/load preserves the metric — no change_metric() needed
+index.save("nphd_index.usearch")
+restored = Index.restore("nphd_index.usearch")
+assert str(restored.metric_kind) == "MetricKind.NPHD"
+```
+
+**Key details:**
+- Only valid with `dtype=ScalarKind.B1` (binary vectors).
+- The length byte encodes the number of data bytes (not bits), excluding itself.
+- When vectors have different lengths, only the common prefix is compared.
+- A length byte of 0 yields distance 0.0 (no data to compare).
 
 ## Serialization & Serving `Index` from Disk
 
