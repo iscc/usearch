@@ -204,13 +204,24 @@ def test_index_duplicates(batch_size):
     reset_randomness()
 
     ndim = 8
+
+    # Cross-batch duplicates: re-adding same keys is a silent no-op
     index = Index(ndim=ndim, multi=False)
     keys = np.arange(batch_size)
     vectors = random_vectors(count=batch_size, ndim=ndim)
     index.add(keys, vectors, threads=threads)
-    with pytest.raises(Exception):
-        index.add(keys, vectors, threads=threads)
+    index.add(keys, vectors, threads=threads)
+    assert len(index) == batch_size
 
+    # Intra-batch duplicates: duplicate keys within same batch are skipped
+    # (single-threaded for deterministic contains() checks)
+    index = Index(ndim=ndim, multi=False)
+    dup_keys = np.concatenate([keys, keys])
+    dup_vectors = np.vstack([vectors, vectors])
+    index.add(dup_keys, dup_vectors, threads=1)
+    assert len(index) == batch_size
+
+    # Multi-index still allows duplicates
     index = Index(ndim=ndim, multi=True)
     keys = np.arange(batch_size)
     vectors = random_vectors(count=batch_size, ndim=ndim)
