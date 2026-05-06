@@ -1016,16 +1016,6 @@ static py::dict index_metadata(index_dense_metadata_result_t const& meta) {
     return result;
 }
 
-// clang-format off
-template <typename index_at> void save_index_to_path(index_at const& index, std::string const& path, progress_func_t const& progress) { index.save(path.c_str(), {}, progress_t{progress}).error.raise(); }
-template <typename index_at> void reset_index(index_at& index) { index.reset(); }
-template <typename index_at> void clear_index(index_at& index) { index.clear(); }
-template <typename index_at> std::size_t max_level(index_at const &index) { return index.max_level(); }
-template <typename index_at> std::size_t serialized_length(index_at const &index) { return index.serialized_length(); }
-template <typename index_at> typename index_at::stats_t compute_stats(index_at const &index) { return index.stats(); }
-template <typename index_at> typename index_at::stats_t compute_level_stats(index_at const &index, std::size_t level) { return index.stats(level); }
-// clang-format on
-
 template <typename function_at>
 void with_optional_gil_release(bool release_gil, function_at&& function) {
     if (release_gil) {
@@ -1035,6 +1025,19 @@ void with_optional_gil_release(bool release_gil, function_at&& function) {
         function();
     }
 }
+
+// clang-format off
+template <typename index_at> void save_index_to_path(index_at const& index, std::string const& path, progress_func_t const& progress, bool release_gil) {
+    if (release_gil && progress) throw std::invalid_argument("release_gil=True is incompatible with progress callbacks");
+    with_optional_gil_release(release_gil, [&] { index.save(path.c_str(), {}, progress_t{progress}).error.raise(); });
+}
+template <typename index_at> void reset_index(index_at& index) { index.reset(); }
+template <typename index_at> void clear_index(index_at& index) { index.clear(); }
+template <typename index_at> std::size_t max_level(index_at const &index) { return index.max_level(); }
+template <typename index_at> std::size_t serialized_length(index_at const &index) { return index.serialized_length(); }
+template <typename index_at> typename index_at::stats_t compute_stats(index_at const &index) { return index.stats(); }
+template <typename index_at> typename index_at::stats_t compute_level_stats(index_at const &index, std::size_t level) { return index.stats(level); }
+// clang-format on
 
 template <typename index_at>
 void load_index_from_path(index_at& index, std::string const& path, progress_func_t const& progress) {
@@ -1063,7 +1066,10 @@ template <typename py_bytes_at> memory_mapped_file_t memory_map_from_bytes(py_by
     return {(byte_t*)(info.ptr), static_cast<std::size_t>(info.size)};
 }
 
-template <typename index_at> py::object save_index_to_buffer(index_at const& index, progress_func_t const& progress) {
+template <typename index_at> py::object save_index_to_buffer(index_at const& index, progress_func_t const& progress, bool release_gil) {
+    if (release_gil && progress)
+        throw std::invalid_argument("release_gil=True is incompatible with progress callbacks");
+
     std::size_t serialized_length = index.serialized_length();
 
     // Create an empty bytearray object using CPython API
@@ -1079,7 +1085,11 @@ template <typename index_at> py::object save_index_to_buffer(index_at const& ind
 
     char* buffer = PyByteArray_AS_STRING(byte_array);
     memory_mapped_file_t memory_map((byte_t*)buffer, serialized_length);
-    serialization_result_t result = index.save(std::move(memory_map), {}, {}, progress_t{progress});
+
+    serialization_result_t result;
+    with_optional_gil_release(release_gil, [&] {
+        result = index.save(std::move(memory_map), {}, {}, progress_t{progress});
+    });
 
     if (!result) {
         Py_XDECREF(byte_array);
@@ -1466,11 +1476,11 @@ static py::class_<index_at, std::shared_ptr<index_at>> bind_dense_index(py::modu
         },
         py::arg("offset"));
 
-    i.def("save_index_to_path", &save_index_to_path<index_at>, py::arg("path"), py::arg("progress") = nullptr);
+    i.def("save_index_to_path", &save_index_to_path<index_at>, py::arg("path"), py::arg("progress") = nullptr, py::arg("release_gil") = false);
     i.def("load_index_from_path", &load_index_from_path<index_at>, py::arg("path"), py::arg("progress") = nullptr);
     i.def("view_index_from_path", &view_index_from_path<index_at>, py::arg("path"), py::arg("progress") = nullptr);
 
-    i.def("save_index_to_buffer", &save_index_to_buffer<index_at>, py::arg("progress") = nullptr);
+    i.def("save_index_to_buffer", &save_index_to_buffer<index_at>, py::arg("progress") = nullptr, py::arg("release_gil") = false);
     i.def("load_index_from_buffer", &load_index_from_buffer<index_at>, py::arg("buffer_obj"), py::arg("progress") = nullptr);
     i.def("view_index_from_buffer", &view_index_from_buffer<index_at>, py::arg("buffer_obj"), py::arg("progress") = nullptr);
 

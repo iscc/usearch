@@ -1211,6 +1211,7 @@ class Index:
         self,
         path_or_buffer: Union[str, os.PathLike, NoneType] = None,
         progress: Optional[ProgressCallback] = None,
+        release_gil: bool = False,
     ) -> Optional[bytes]:
         """Saves the index to a file or buffer.
 
@@ -1220,16 +1221,23 @@ class Index:
         :type path_or_buffer: Union[str, os.PathLike, NoneType], optional
         :param progress: A callback function for progress tracking.
         :type progress: Optional[ProgressCallback], optional
+        :param release_gil: If True, release the Python GIL during serialization.
+            The caller MUST ensure no other thread accesses this index object
+            while the save is in progress. Incompatible with progress callbacks.
+        :type release_gil: bool
         :return: The index data as bytes if saving to a buffer, otherwise None.
         :rtype: Optional[bytes]
+        :raises ValueError: If release_gil=True and progress is not None.
         """
+        if release_gil and progress:
+            raise ValueError("release_gil=True is incompatible with progress callbacks")
         assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
         path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
-            return self._compiled.save_index_to_buffer(progress)
+            return self._compiled.save_index_to_buffer(progress, release_gil)
         else:
-            self._compiled.save_index_to_path(os.fspath(path_or_buffer), progress)
+            self._compiled.save_index_to_path(os.fspath(path_or_buffer), progress, release_gil)
 
     def load(
         self,
