@@ -2102,7 +2102,7 @@ class index_dense_gt {
         std::size_t thread, bool copy_vector, cast_punned_t const& cast) {
 
         if (!multi() && config().enable_key_lookups && contains(key))
-            return add_result_t{}.failed("Duplicate keys not allowed in high-level wrappers");
+            return add_result_t{};
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
