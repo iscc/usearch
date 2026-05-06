@@ -490,6 +490,121 @@ def test_index_uuid128_save_load_view_roundtrip_and_mismatch():
     os.remove("tmp-uuid.usearch")
 
 
+def test_save_release_gil_path():
+    """Save to path with release_gil=True allows other threads to run."""
+    import threading
+
+    ndim = 64
+    batch_size = 10_000
+    index = Index(ndim=ndim)
+    keys = np.arange(batch_size)
+    vectors = random_vectors(count=batch_size, ndim=ndim)
+    index.add(keys, vectors)
+
+    counter = [0]
+    stop = threading.Event()
+
+    def count_loop():
+        while not stop.is_set():
+            counter[0] += 1
+
+    path = "tmp_gil_release.usearch"
+    try:
+        t = threading.Thread(target=count_loop)
+        t.start()
+        index.save(path, release_gil=True)
+        stop.set()
+        t.join()
+        assert counter[0] > 0, "Counter thread did not make progress during GIL-released save"
+
+        restored = Index.restore(path, view=False)
+        assert len(restored) == batch_size
+        assert set(np.array(restored.keys)) == set(keys)
+    finally:
+        stop.set()
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_save_release_gil_buffer():
+    """Save to buffer with release_gil=True allows other threads to run."""
+    import threading
+
+    ndim = 64
+    batch_size = 10_000
+    index = Index(ndim=ndim)
+    keys = np.arange(batch_size)
+    vectors = random_vectors(count=batch_size, ndim=ndim)
+    index.add(keys, vectors)
+
+    counter = [0]
+    stop = threading.Event()
+
+    def count_loop():
+        while not stop.is_set():
+            counter[0] += 1
+
+    t = threading.Thread(target=count_loop)
+    t.start()
+    buf = index.save(release_gil=True)
+    stop.set()
+    t.join()
+    assert counter[0] > 0, "Counter thread did not make progress during GIL-released save"
+
+    restored = Index.restore(buf)
+    assert len(restored) == batch_size
+    assert set(np.array(restored.keys)) == set(keys)
+
+
+def test_save_release_gil_conflict_with_progress():
+    """release_gil=True with a progress callback raises ValueError."""
+    index = Index(ndim=8)
+    index.add(np.array([0]), random_vectors(count=1, ndim=8))
+
+    def progress_cb(completed, total):
+        return True
+
+    with pytest.raises(ValueError, match="release_gil.*incompatible.*progress"):
+        index.save("tmp.usearch", progress=progress_cb, release_gil=True)
+
+    with pytest.raises(ValueError, match="release_gil.*incompatible.*progress"):
+        index.save(progress=progress_cb, release_gil=True)
+
+
+def test_save_release_gil_error_propagation():
+    """Save to nonexistent path with release_gil=True raises an exception."""
+    index = Index(ndim=8)
+    index.add(np.array([0]), random_vectors(count=1, ndim=8))
+
+    with pytest.raises(Exception):
+        index.save("/nonexistent/dir/file.usearch", release_gil=True)
+
+
+def test_save_default_behavior_unchanged():
+    """Save without release_gil produces valid output identical to before."""
+    ndim = 16
+    batch_size = 100
+    index = Index(ndim=ndim)
+    keys = np.arange(batch_size)
+    vectors = random_vectors(count=batch_size, ndim=ndim)
+    index.add(keys, vectors)
+
+    path = "tmp_default_save.usearch"
+    try:
+        index.save(path)
+        restored = Index.restore(path, view=False)
+        assert len(restored) == batch_size
+        assert set(np.array(restored.keys)) == set(keys)
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+    buf = index.save()
+    restored = Index.restore(buf)
+    assert len(restored) == batch_size
+    assert set(np.array(restored.keys)) == set(keys)
+
+
 @pytest.mark.skip(reason="Not guaranteed")
 @pytest.mark.parametrize("batch_size", [3, 17, 33])
 @pytest.mark.parametrize("threads", [1, 4])
