@@ -2653,7 +2653,8 @@ class flat_hash_multi_set_gt {
 
   public:
     std::size_t size() const noexcept { return populated_slots_; }
-    std::size_t capacity() const noexcept { return capacity_slots_; }
+    std::size_t capacity() const noexcept { return capacity_slots_ * 2u / 3u; }
+    std::size_t capacity_slots() const noexcept { return capacity_slots_; }
 
     flat_hash_multi_set_gt() noexcept {}
     ~flat_hash_multi_set_gt() noexcept { reset(); }
@@ -2756,7 +2757,7 @@ class flat_hash_multi_set_gt {
     }
 
     bool try_reserve(std::size_t capacity) noexcept {
-        if (capacity * 3u <= capacity_slots_ * 2u)
+        if (capacity <= this->capacity())
             return true;
 
         // Calculate new sizes
