@@ -998,7 +998,8 @@ class index_dense_gt {
         std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
         typed_->clear();
         slot_lookup_.clear();
-        vectors_lookup_.reset();
+        // Tape pointers are about to be invalidated by the reset below.
+        std::fill(vectors_lookup_.begin(), vectors_lookup_.end(), nullptr);
         vectors_view_base_ = nullptr;
         vectors_view_stride_ = 0;
         vectors_view_count_ = 0;
