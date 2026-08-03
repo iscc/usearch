@@ -991,7 +991,7 @@ static void compact_index(index_at& index, std::size_t threads, progress_func_t 
     if (!index.try_reserve(index_limits_t(index.size(), threads)))
         throw std::invalid_argument("Out of memory!");
 
-    index.compact(executor_default_t{threads}, progress_t{progress});
+    forward_error(index.compact(executor_default_t{threads}, progress_t{progress}));
 }
 
 static py::dict index_metadata(index_dense_metadata_result_t const& meta) {

@@ -998,7 +998,8 @@ class index_dense_gt {
         std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
         typed_->clear();
         slot_lookup_.clear();
-        vectors_lookup_.reset();
+        // Tape pointers are about to be invalidated by the reset below.
+        std::fill(vectors_lookup_.begin(), vectors_lookup_.end(), nullptr);
         vectors_view_base_ = nullptr;
         vectors_view_stride_ = 0;
         vectors_view_count_ = 0;
@@ -1830,10 +1831,23 @@ class index_dense_gt {
             std::memcpy(new_vector, old_vector, metric_.bytes_per_vector());
             new_vectors_lookup[new_slot] = new_vector;
         };
+        // The typed `compact` aborts without committing when `progress` requests
+        // cancellation, so observe that request and keep the old buffers in that case.
+        bool cancelled = false;
+        auto observed_progress = [&](std::size_t processed, std::size_t total) {
+            bool proceed = progress(processed, total);
+            cancelled |= !proceed;
+            return proceed;
+        };
         typed_->compact(values_proxy_t{*this}, metric_proxy_t{*this}, track_slot_change,
-                        std::forward<executor_at>(executor), std::forward<progress_at>(progress));
+                        std::forward<executor_at>(executor), observed_progress);
+        if (cancelled)
+            return result.failed("Terminated by user");
         vectors_lookup_ = std::move(new_vectors_lookup);
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
+        // Compaction renumbers slots, so the key→slot map and the free-slot ring hold
+        // stale slot numbers and must be rebuilt before any lookup or insertion.
+        reindex_keys_();
         return result;
     }
 

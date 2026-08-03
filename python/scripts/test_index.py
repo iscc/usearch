@@ -400,6 +400,109 @@ def test_index_contains_remove_rename(batch_size):
     assert np.sum(index.count(removed_keys)) == len(index)
 
 
+def test_index_compact_preserves_lookups():
+    """After compact() reorders slots, get() must still return each key's own vector,
+    and recycled slots must remain safe to reuse for insertions."""
+    reset_randomness()
+
+    ndim = 16
+    count = 512
+    index = Index(ndim=ndim, multi=False, dtype=ScalarKind.F32)
+    keys = np.arange(1, count + 1, dtype=np.uint64)
+    vectors = random_vectors(count=count, ndim=ndim).astype(np.float32)
+
+    index.add(keys, vectors)
+    index.compact()
+    assert len(index) == count
+    for i, key in enumerate(keys):
+        retrieved = np.asarray(index.get(int(key)), dtype=np.float32).ravel()
+        assert np.allclose(retrieved, vectors[i], atol=1e-5), f"get({key}) returned another key's vector"
+
+    # Removals put slots on the free list; compact() renumbers slots, so the free
+    # list must be rebuilt for subsequent insertions to not overwrite live nodes.
+    removed_keys = keys[: count // 4]
+    surviving_keys = keys[count // 4 :]
+    index.remove(removed_keys)
+    index.compact()
+    assert len(index) == len(surviving_keys)
+
+    fresh_keys = np.arange(count + 1, count + 1 + len(removed_keys), dtype=np.uint64)
+    fresh_vectors = random_vectors(count=len(removed_keys), ndim=ndim).astype(np.float32)
+    index.add(fresh_keys, fresh_vectors)
+
+    for i, key in enumerate(surviving_keys):
+        retrieved = np.asarray(index.get(int(key)), dtype=np.float32).ravel()
+        assert np.allclose(retrieved, vectors[count // 4 + i], atol=1e-5), f"get({key}) corrupted by reinsertion"
+    for i, key in enumerate(fresh_keys):
+        retrieved = np.asarray(index.get(int(key)), dtype=np.float32).ravel()
+        assert np.allclose(retrieved, fresh_vectors[i], atol=1e-5), f"get({key}) returned another key's vector"
+
+
+def test_index_compact_then_grow():
+    """Growing an index after compact() must stay within the nodes buffer: compaction
+    must preserve the reserved capacity, not shrink the buffer to the populated count."""
+    reset_randomness()
+
+    ndim = 16
+    initial = 2100  # Auto-reserve rounds up to 4096 slots
+    extra = 1900  # Grows within the prior reservation, so no reallocation rescues an undersized buffer
+    index = Index(ndim=ndim, multi=False, dtype=ScalarKind.F32)
+    keys = np.arange(initial, dtype=np.uint64)
+    vectors = random_vectors(count=initial, ndim=ndim).astype(np.float32)
+    index.add(keys, vectors)
+    index.compact(threads=1)
+
+    extra_keys = np.arange(initial, initial + extra, dtype=np.uint64)
+    extra_vectors = random_vectors(count=extra, ndim=ndim).astype(np.float32)
+    index.add(extra_keys, extra_vectors)
+    assert len(index) == initial + extra
+
+    for key in (0, initial - 1, initial, initial + extra - 1):
+        expected = vectors[key] if key < initial else extra_vectors[key - initial]
+        retrieved = np.asarray(index.get(int(key)), dtype=np.float32).ravel()
+        assert np.allclose(retrieved, expected, atol=1e-5), f"get({key}) returned another key's vector"
+
+    # Alternating mutations with periodic compactions must not corrupt the index either.
+    live = list(range(initial + extra))
+    next_key = initial + extra
+    for update in range(1, 201):
+        if update % 2:
+            index.remove(live.pop(0))
+        else:
+            index.add(next_key, random_vectors(count=1, ndim=ndim).astype(np.float32))
+            live.append(next_key)
+            next_key += 1
+        if update % 10 == 0:
+            index.compact(threads=1)
+    assert len(index) == len(live)
+    assert index.search(random_vectors(count=1, ndim=ndim).astype(np.float32), 10).keys.size == 10
+
+
+def test_index_compact_cancellation():
+    """A progress callback returning False must abort compact() with an error,
+    leaving the index unchanged and fully usable."""
+    reset_randomness()
+
+    ndim = 16
+    count = 128
+    index = Index(ndim=ndim, multi=False, dtype=ScalarKind.F32)
+    keys = np.arange(count, dtype=np.uint64)
+    vectors = random_vectors(count=count, ndim=ndim).astype(np.float32)
+    index.add(keys, vectors)
+
+    with pytest.raises(ValueError):
+        index.compact(threads=1, progress=lambda processed, total: False)
+
+    assert len(index) == count
+    for key in (0, count // 2, count - 1):
+        retrieved = np.asarray(index.get(int(key)), dtype=np.float32).ravel()
+        assert np.allclose(retrieved, vectors[key], atol=1e-5), f"get({key}) broken after cancelled compact"
+
+    # A subsequent uncancelled compaction must succeed.
+    index.compact(threads=1)
+    assert len(index) == count
+
+
 def test_index_uuid128_workflow():
     reset_randomness()
 
