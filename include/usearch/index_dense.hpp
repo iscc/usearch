@@ -1831,10 +1831,23 @@ class index_dense_gt {
             std::memcpy(new_vector, old_vector, metric_.bytes_per_vector());
             new_vectors_lookup[new_slot] = new_vector;
         };
+        // The typed `compact` aborts without committing when `progress` requests
+        // cancellation, so observe that request and keep the old buffers in that case.
+        bool cancelled = false;
+        auto observed_progress = [&](std::size_t processed, std::size_t total) {
+            bool proceed = progress(processed, total);
+            cancelled |= !proceed;
+            return proceed;
+        };
         typed_->compact(values_proxy_t{*this}, metric_proxy_t{*this}, track_slot_change,
-                        std::forward<executor_at>(executor), std::forward<progress_at>(progress));
+                        std::forward<executor_at>(executor), observed_progress);
+        if (cancelled)
+            return result.failed("Terminated by user");
         vectors_lookup_ = std::move(new_vectors_lookup);
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
+        // Compaction renumbers slots, so the key→slot map and the free-slot ring hold
+        // stale slot numbers and must be rebuilt before any lookup or insertion.
+        reindex_keys_();
         return result;
     }
 

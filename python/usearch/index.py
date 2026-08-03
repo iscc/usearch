@@ -1310,6 +1310,23 @@ class Index:
         """Erases all vectors from the index, preserving the allocated space for future insertions."""
         self._compiled.clear()
 
+    def compact(
+        self,
+        threads: int = 0,
+        progress: Optional[ProgressCallback] = None,
+    ):
+        """Reorders the index nodes for better memory locality, rebuilding key lookups.
+
+        If the progress callback returns ``False``, the compaction is aborted,
+        the index is left unchanged, and a ``ValueError`` is raised.
+
+        :param threads: Number of threads to use, defaults to 0 (all available)
+        :type threads: int, optional
+        :param progress: Callback to report stats of the progress and control it
+        :type progress: Optional[ProgressCallback], defaults to None
+        """
+        self._compiled.compact(threads, progress)
+
     def reset(self):
         """Erases all data from the index, closes any open files, and returns allocated memory to the OS."""
         if not hasattr(self, "_compiled"):
